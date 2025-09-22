@@ -1,0 +1,14 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "ssl": true
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "timeout": 30.5
+  },
+  "debug": false,
+  "name": "my-app"
+}
