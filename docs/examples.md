@@ -1,6 +1,6 @@
 # Examples
 
-Real-world examples of using Flare for configuration management with schema validation and TOML support.
+Real-world examples of using Flare for configuration management with schema validation, array support, CLI integration, and Flash framework compatibility.
 
 ## Basic TOML Configuration
 
@@ -628,4 +628,488 @@ pub fn main() !void {
 }
 ```
 
-These examples demonstrate the flexibility and power of Flare for various application types and deployment scenarios.
+## Flash CLI Integration Example
+
+Complete CLI application using Flash + Flare for configuration management.
+
+### Configuration Files
+
+**config.toml:**
+```toml
+[app]
+name = "DBTools"
+version = "2.0.0"
+
+[database]
+host = "localhost"
+port = 5432
+ssl = true
+timeout = 30
+
+[[servers]]
+name = "primary"
+host = "db1.example.com"
+port = 5432
+region = "us-east-1"
+
+[[servers]]
+name = "replica"
+host = "db2.example.com"
+port = 5432
+region = "us-west-2"
+```
+
+**main.zig:**
+```zig
+const std = @import("std");
+const flash = @import("flash");
+const flare = @import("flare");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Define CLI application
+    const cli = flash.CLI(.{
+        .name = "dbtools",
+        .version = "2.0.0",
+        .about = "Database management tools with configuration",
+    });
+
+    // Shared configuration options
+    const config_options = flare.flash.FlashConfigOptions{
+        .config_files = &[_]flare.FileSource{
+            .{ .path = "config.toml", .required = false },
+            .{ .path = "~/.dbtools/config.toml", .required = false },
+        },
+        .env_source = .{ .prefix = "DBTOOLS", .separator = "_" },
+    };
+
+    // Add commands with configuration integration
+    try cli.addCommands(&.{
+        flare.flash.createConfigCommand(
+            "connect",
+            "Connect to database",
+            config_options,
+            &[_]flare.flash.FlagLink{
+                .{ .flag_name = "host", .config_key = "database.host", .short = "h" },
+                .{ .flag_name = "port", .config_key = "database.port", .short = "p" },
+                .{ .flag_name = "ssl", .config_key = "database.ssl" },
+            },
+            connectHandler,
+        ),
+
+        flare.flash.createConfigCommand(
+            "servers",
+            "List available database servers",
+            config_options,
+            &[_]flare.flash.FlagLink{},
+            serversHandler,
+        ),
+
+        flare.flash.createConfigCommand(
+            "backup",
+            "Backup database",
+            config_options,
+            &[_]flare.flash.FlagLink{
+                .{ .flag_name = "server", .config_key = "backup.target_server" },
+                .{ .flag_name = "output", .config_key = "backup.output_dir", .short = "o" },
+            },
+            backupHandler,
+        ),
+    });
+
+    try cli.run(allocator);
+}
+
+fn connectHandler(ctx: flare.flash.CommandContext) !void {
+    const host = try ctx.config.getString("database.host", "localhost");
+    const port = try ctx.config.getInt("database.port", 5432);
+    const ssl = try ctx.config.getBool("database.ssl", false);
+
+    std.debug.print("🔌 Connecting to database...\n");
+    std.debug.print("   Host: {s}\n", .{host});
+    std.debug.print("   Port: {d}\n", .{port});
+    std.debug.print("   SSL:  {}\n", .{ssl});
+}
+
+fn serversHandler(ctx: flare.flash.CommandContext) !void {
+    // Access array configuration
+    const servers = try ctx.config.getArray("servers");
+
+    std.debug.print("🗄️  Available Database Servers\n");
+    std.debug.print("════════════════════════════\n");
+
+    for (servers.items, 0..) |server, i| {
+        if (server.map_value.get("name")) |name| {
+            if (server.map_value.get("host")) |host| {
+                if (server.map_value.get("region")) |region| {
+                    std.debug.print("[{d}] {s}: {s} ({s})\n",
+                                   .{ i, name.string_value, host.string_value, region.string_value });
+                }
+            }
+        }
+    }
+}
+
+fn backupHandler(ctx: flare.flash.CommandContext) !void {
+    const output_dir = try ctx.config.getString("backup.output_dir", "/tmp/backups");
+    const target_server = try ctx.config.getString("backup.target_server", "primary");
+
+    // Find server by name
+    const servers = try ctx.config.getArray("servers");
+    var target_host: ?[]const u8 = null;
+
+    for (servers.items) |server| {
+        if (server.map_value.get("name")) |name| {
+            if (std.mem.eql(u8, name.string_value, target_server)) {
+                if (server.map_value.get("host")) |host| {
+                    target_host = host.string_value;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (target_host) |host| {
+        std.debug.print("💾 Starting backup...\n");
+        std.debug.print("   Source: {s}\n", .{host});
+        std.debug.print("   Output: {s}\n", .{output_dir});
+    } else {
+        std.debug.print("❌ Error: Server '{s}' not found in configuration\n", .{target_server});
+    }
+}
+```
+
+### Usage Examples
+
+```bash
+# Use configuration file defaults
+./dbtools connect
+
+# Override with CLI flags
+./dbtools connect --host=prod-db.com --port=3306 --ssl=false
+
+# Use environment variables
+export DBTOOLS_DATABASE_HOST=staging-db.com
+./dbtools servers
+
+# Backup to specific server
+./dbtools backup --server=replica --output=/backup/$(date +%Y%m%d)
+```
+
+## Array Configuration Example
+
+Working with arrays and nested objects for complex configurations.
+
+### Configuration (arrays.toml)
+
+```toml
+[loadbalancer]
+algorithm = "round_robin"
+health_check_interval = 30
+
+[[loadbalancer.upstreams]]
+name = "api-v1"
+weight = 100
+
+[[loadbalancer.upstreams.servers]]
+host = "api1.example.com"
+port = 8080
+health_endpoint = "/health"
+
+[[loadbalancer.upstreams.servers]]
+host = "api2.example.com"
+port = 8080
+health_endpoint = "/health"
+
+[[loadbalancer.upstreams]]
+name = "api-v2"
+weight = 50
+
+[[loadbalancer.upstreams.servers]]
+host = "api-v2-1.example.com"
+port = 9000
+health_endpoint = "/healthz"
+
+# Feature flags as simple arrays
+feature_flags = ["new_ui", "advanced_auth", "beta_api"]
+
+# Environment-specific servers
+[environments.production]
+database_servers = ["prod-db1.com", "prod-db2.com", "prod-db3.com"]
+
+[environments.staging]
+database_servers = ["staging-db.com"]
+```
+
+### Application Code
+
+```zig
+const std = @import("std");
+const flare = @import("flare");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{
+            .{ .path = "arrays.toml", .format = .toml },
+        },
+    });
+    defer config.deinit();
+
+    // Working with nested arrays
+    std.debug.print("🔄 Load Balancer Configuration\n");
+    std.debug.print("══════════════════════════════\n");
+
+    const algorithm = try config.getString("loadbalancer.algorithm", "round_robin");
+    const health_interval = try config.getInt("loadbalancer.health_check_interval", 30);
+
+    std.debug.print("Algorithm: {s}\n", .{algorithm});
+    std.debug.print("Health Check Interval: {d}s\n\n", .{health_interval});
+
+    // Access upstream groups
+    const upstreams = try config.getArray("loadbalancer.upstreams");
+
+    for (upstreams.items, 0..) |upstream, i| {
+        if (upstream.map_value.get("name")) |name| {
+            if (upstream.map_value.get("weight")) |weight| {
+                std.debug.print("Upstream [{d}]: {s} (weight: {d})\n",
+                               .{ i, name.string_value, weight.int_value });
+
+                // Access servers within this upstream
+                if (upstream.map_value.get("servers")) |servers_value| {
+                    for (servers_value.array_value.items, 0..) |server, j| {
+                        if (server.map_value.get("host")) |host| {
+                            if (server.map_value.get("port")) |port| {
+                                std.debug.print("  └─ Server [{d}]: {s}:{d}\n",
+                                               .{ j, host.string_value, port.int_value });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std.debug.print("\n");
+    }
+
+    // Simple string arrays
+    std.debug.print("🚩 Feature Flags\n");
+    std.debug.print("═══════════════\n");
+
+    const flags = try config.getStringList("feature_flags");
+    for (flags) |flag| {
+        std.debug.print("✅ {s}\n", .{flag});
+    }
+
+    // Environment-specific arrays
+    std.debug.print("\n🏗️  Environment Servers\n");
+    std.debug.print("═══════════════════════\n");
+
+    const prod_servers = try config.getStringList("environments.production.database_servers");
+    std.debug.print("Production ({d} servers):\n", .{prod_servers.len});
+    for (prod_servers) |server| {
+        std.debug.print("  • {s}\n", .{server});
+    }
+
+    const staging_servers = try config.getStringList("environments.staging.database_servers");
+    std.debug.print("Staging ({d} servers):\n", .{staging_servers.len});
+    for (staging_servers) |server| {
+        std.debug.print("  • {s}\n", .{server});
+    }
+}
+```
+
+## CLI Arguments with JSON Values
+
+Advanced CLI usage with complex data types.
+
+```zig
+const std = @import("std");
+const flare = @import("flare");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Get CLI arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{
+            .{ .path = "config.toml", .required = false },
+        },
+        .env = .{ .prefix = "APP", .separator = "__" },
+        .cli = .{ .args = args },
+    });
+    defer config.deinit();
+
+    // CLI can override simple values
+    const host = try config.getString("database.host", "localhost");
+    const port = try config.getInt("database.port", 5432);
+
+    std.debug.print("Database: {s}:{d}\n", .{ host, port });
+
+    // CLI can pass JSON arrays
+    if (config.hasKey("servers")) {
+        const servers = try config.getArray("servers");
+        std.debug.print("CLI Servers ({d}):\n", .{servers.items.len});
+
+        for (servers.items) |server| {
+            if (server.map_value.get("name")) |name| {
+                if (server.map_value.get("url")) |url| {
+                    std.debug.print("  • {s}: {s}\n", .{ name.string_value, url.string_value });
+                }
+            }
+        }
+    }
+}
+```
+
+**Usage:**
+```bash
+# Simple CLI overrides
+./myapp --database-host=prod.db.com --database-port=3306
+
+# JSON array via CLI
+./myapp --servers='[{"name":"api-1","url":"https://api1.com"},{"name":"api-2","url":"https://api2.com"}]'
+
+# JSON object via CLI
+./myapp --cache='{"redis":{"host":"cache.com","port":6379},"ttl":3600}'
+```
+
+## Multi-Environment Configuration
+
+Advanced configuration management for different deployment environments.
+
+### Base Configuration (config.toml)
+
+```toml
+[app]
+name = "MyApp"
+version = "1.0.0"
+
+[database]
+host = "localhost"
+port = 5432
+pool_size = 10
+
+[logging]
+level = "info"
+format = "json"
+```
+
+### Environment Overrides
+
+**config.development.toml:**
+```toml
+[database]
+host = "dev-db.local"
+ssl = false
+
+[logging]
+level = "debug"
+file = "app-dev.log"
+
+# Development-specific features
+[features]
+debug_routes = true
+mock_external_apis = true
+```
+
+**config.production.toml:**
+```toml
+[database]
+host = "prod-db.example.com"
+ssl = true
+pool_size = 50
+
+[logging]
+level = "warn"
+file = "/var/log/myapp.log"
+
+[security]
+rate_limit = 1000
+cors_origins = ["https://myapp.com", "https://www.myapp.com"]
+```
+
+### Environment-Aware Loading
+
+```zig
+const std = @import("std");
+const flare = @import("flare");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Determine environment
+    const env = std.process.getEnvVarOwned(allocator, "APP_ENV") catch "development";
+    defer allocator.free(env);
+
+    // Build configuration file list based on environment
+    var config_files = std.ArrayList(flare.FileSource).init(allocator);
+    defer config_files.deinit();
+
+    // Always load base config
+    try config_files.append(.{ .path = "config.toml", .required = true });
+
+    // Add environment-specific config
+    const env_config = try std.fmt.allocPrint(allocator, "config.{s}.toml", .{env});
+    defer allocator.free(env_config);
+    try config_files.append(.{ .path = env_config, .required = false });
+
+    // Add local overrides (never committed to git)
+    try config_files.append(.{ .path = "config.local.toml", .required = false });
+
+    // Load with full precedence
+    var config = try flare.load(allocator, .{
+        .files = config_files.items,
+        .env = .{ .prefix = "APP", .separator = "__" },
+    });
+    defer config.deinit();
+
+    std.debug.print("🌍 Environment: {s}\n", .{env});
+    std.debug.print("═══════════════════\n");
+
+    // Database configuration
+    const db_host = try config.getString("database.host", "localhost");
+    const db_ssl = try config.getBool("database.ssl", false);
+    const pool_size = try config.getInt("database.pool_size", 10);
+
+    std.debug.print("Database: {s} (SSL: {}, Pool: {d})\n",
+                    .{ db_host, db_ssl, pool_size });
+
+    // Logging configuration
+    const log_level = try config.getString("logging.level", "info");
+    const log_file = try config.getString("logging.file", "app.log");
+
+    std.debug.print("Logging: {s} level to {s}\n", .{ log_level, log_file });
+
+    // Environment-specific features
+    if (std.mem.eql(u8, env, "development")) {
+        const debug_routes = try config.getBool("features.debug_routes", false);
+        const mock_apis = try config.getBool("features.mock_external_apis", false);
+
+        std.debug.print("Dev Features: debug_routes={}, mock_apis={}\n",
+                        .{ debug_routes, mock_apis });
+    } else if (std.mem.eql(u8, env, "production")) {
+        const rate_limit = try config.getInt("security.rate_limit", 100);
+
+        if (config.hasKey("security.cors_origins")) {
+            const origins = try config.getStringList("security.cors_origins");
+            std.debug.print("Security: rate_limit={d}, CORS origins: {d}\n",
+                            .{ rate_limit, origins.len });
+        }
+    }
+}
+```
+
+These examples demonstrate the advanced capabilities of Flare including Flash CLI integration, array handling, multi-environment configuration, and complex data type support.

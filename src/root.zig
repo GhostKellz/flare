@@ -10,6 +10,9 @@ pub const ValidationResult = @import("schema.zig").ValidationResult;
 pub const Validator = @import("validator.zig").Validator;
 pub const validateConfig = @import("validator.zig").validateConfig;
 
+// Export Flash bridge module
+pub const flash = @import("flash_bridge.zig");
+
 /// Flare error types
 pub const FlareError = error{
     ParseError,
@@ -30,7 +33,8 @@ pub const Value = union(enum) {
     int_value: i64,
     float_value: f64,
     string_value: []const u8,
-    // TODO: Add list_value and map_value in future version
+    array_value: std.ArrayList(Value),
+    map_value: std.StringHashMap(Value),
 };
 
 /// Core configuration type with immutable snapshot and memory pool
@@ -81,13 +85,7 @@ pub const Config = struct {
     pub fn setDefault(self: *Self, key: []const u8, value: Value) !void {
         const arena_allocator = self.getArenaAllocator();
         const owned_key = try arena_allocator.dupe(u8, key);
-        const owned_value = switch (value) {
-            .null_value => .null_value,
-            .bool_value => |b| Value{ .bool_value = b },
-            .int_value => |i| Value{ .int_value = i },
-            .float_value => |f| Value{ .float_value = f },
-            .string_value => |s| Value{ .string_value = try arena_allocator.dupe(u8, s) },
-        };
+        const owned_value = try self.cloneValue(value);
         try self.defaults.put(owned_key, owned_value);
     }
 
@@ -141,6 +139,52 @@ pub const Config = struct {
         return default_value orelse FlareError.MissingKey;
     }
 
+    /// Get an array value by key path
+    pub fn getArray(self: *Self, key: []const u8) FlareError!std.ArrayList(Value) {
+        if (self.getValue(key)) |value| {
+            return switch (value) {
+                .array_value => |arr| arr,
+                else => FlareError.TypeMismatch,
+            };
+        }
+        return FlareError.MissingKey;
+    }
+
+    /// Get a map value by key path
+    pub fn getMap(self: *Self, key: []const u8) FlareError!std.StringHashMap(Value) {
+        if (self.getValue(key)) |value| {
+            return switch (value) {
+                .map_value => |map| map,
+                else => FlareError.TypeMismatch,
+            };
+        }
+        return FlareError.MissingKey;
+    }
+
+    /// Get a list of strings by key path
+    pub fn getStringList(self: *Self, key: []const u8) FlareError![][]const u8 {
+        const array = try self.getArray(key);
+        const arena_allocator = self.getArenaAllocator();
+        const result = try arena_allocator.alloc([]const u8, array.items.len);
+
+        for (array.items, 0..) |item, i| {
+            result[i] = switch (item) {
+                .string_value => |s| s,
+                else => return FlareError.TypeMismatch,
+            };
+        }
+        return result;
+    }
+
+    /// Get a value by array index (e.g., "servers[0]")
+    pub fn getByIndex(self: *Self, key: []const u8, index: usize) FlareError!Value {
+        const array = try self.getArray(key);
+        if (index >= array.items.len) {
+            return FlareError.InvalidArrayIndex;
+        }
+        return array.items[index];
+    }
+
     /// Internal helper to get a value by key, checking data first, then defaults
     pub fn getValue(self: *Self, key: []const u8) ?Value {
         // First try the direct key lookup
@@ -191,8 +235,56 @@ pub const Config = struct {
             .int_value => |i| Value{ .int_value = i },
             .float_value => |f| Value{ .float_value = f },
             .string_value => |s| Value{ .string_value = try arena_allocator.dupe(u8, s) },
+            .array_value => |arr| blk: {
+                var new_array: std.ArrayList(Value) = .{};
+                try new_array.ensureTotalCapacity(arena_allocator, arr.items.len);
+                for (arr.items) |item| {
+                    try new_array.append(arena_allocator, try self.cloneValue(item));
+                }
+                break :blk Value{ .array_value = new_array };
+            },
+            .map_value => |map| blk: {
+                var new_map = std.StringHashMap(Value).init(arena_allocator);
+                var iter = map.iterator();
+                while (iter.next()) |entry| {
+                    const k = try arena_allocator.dupe(u8, entry.key_ptr.*);
+                    const v = try self.cloneValue(entry.value_ptr.*);
+                    try new_map.put(k, v);
+                }
+                break :blk Value{ .map_value = new_map };
+            },
         };
         try self.data.put(owned_key, owned_value);
+    }
+
+    /// Helper to clone a value for storage
+    fn cloneValue(self: *Self, value: Value) !Value {
+        const arena_allocator = self.getArenaAllocator();
+        return switch (value) {
+            .null_value => .null_value,
+            .bool_value => |b| Value{ .bool_value = b },
+            .int_value => |i| Value{ .int_value = i },
+            .float_value => |f| Value{ .float_value = f },
+            .string_value => |s| Value{ .string_value = try arena_allocator.dupe(u8, s) },
+            .array_value => |arr| blk: {
+                var new_array: std.ArrayList(Value) = .{};
+                try new_array.ensureTotalCapacity(arena_allocator, arr.items.len);
+                for (arr.items) |item| {
+                    try new_array.append(arena_allocator, try self.cloneValue(item));
+                }
+                break :blk Value{ .array_value = new_array };
+            },
+            .map_value => |map| blk: {
+                var new_map = std.StringHashMap(Value).init(arena_allocator);
+                var iter = map.iterator();
+                while (iter.next()) |entry| {
+                    const k = try arena_allocator.dupe(u8, entry.key_ptr.*);
+                    const v = try self.cloneValue(entry.value_ptr.*);
+                    try new_map.put(k, v);
+                }
+                break :blk Value{ .map_value = new_map };
+            },
+        };
     }
 
     /// Validate that all required keys are present
@@ -279,9 +371,9 @@ pub fn load(allocator: std.mem.Allocator, options: LoadOptions) FlareError!Confi
         try loadEnv(&config, env_source);
     }
 
-    // TODO: Load from CLI args (highest precedence)
-    if (options.cli) |_| {
-        // CLI loading not implemented yet
+    // Load from CLI args (highest precedence)
+    if (options.cli) |cli_source| {
+        try loadCli(&config, cli_source);
     }
 
     return config;
@@ -325,6 +417,47 @@ fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
     }
 }
 
+/// Convert JSON value to flare Value
+fn jsonToValue(config: *Config, json_value: std.json.Value) FlareError!Value {
+    const arena_allocator = config.getArenaAllocator();
+    return switch (json_value) {
+        .string => |s| Value{ .string_value = try arena_allocator.dupe(u8, s) },
+        .integer => |i| Value{ .int_value = i },
+        .float => |f| Value{ .float_value = f },
+        .bool => |b| Value{ .bool_value = b },
+        .null => Value.null_value,
+        .number_string => |s| blk: {
+            if (std.fmt.parseInt(i64, s, 10)) |i| {
+                break :blk Value{ .int_value = i };
+            } else |_| {
+                if (std.fmt.parseFloat(f64, s)) |f| {
+                    break :blk Value{ .float_value = f };
+                } else |_| {
+                    break :blk Value{ .string_value = try arena_allocator.dupe(u8, s) };
+                }
+            }
+        },
+        .array => |arr| blk: {
+            var array_list: std.ArrayList(Value) = .{};
+            try array_list.ensureTotalCapacity(arena_allocator, arr.items.len);
+            for (arr.items) |item| {
+                const element_value = try jsonToValue(config, item);
+                try array_list.append(arena_allocator, element_value);
+            }
+            break :blk Value{ .array_value = array_list };
+        },
+        .object => |obj| blk: {
+            var map = std.StringHashMap(Value).init(arena_allocator);
+            for (obj.keys(), obj.values()) |key, value| {
+                const owned_key = try arena_allocator.dupe(u8, key);
+                const owned_value = try jsonToValue(config, value);
+                try map.put(owned_key, owned_value);
+            }
+            break :blk Value{ .map_value = map };
+        },
+    };
+}
+
 /// Recursively load JSON object into config
 fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Value) FlareError!void {
     switch (json_value) {
@@ -366,8 +499,15 @@ fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Valu
         .null => {
             try config.setValue(prefix, Value.null_value);
         },
-        .array => {
-            // For now, skip arrays - will implement in future version
+        .array => |arr| {
+            const arena_allocator = config.getArenaAllocator();
+            var array_list: std.ArrayList(Value) = .{};
+            try array_list.ensureTotalCapacity(arena_allocator, arr.items.len);
+            for (arr.items) |item| {
+                const element_value = try jsonToValue(config, item);
+                try array_list.append(arena_allocator, element_value);
+            }
+            try config.setValue(prefix, Value{ .array_value = array_list });
         },
     }
 }
@@ -465,6 +605,154 @@ fn determineFileFormat(path: []const u8, explicit_format: FileFormat) FileFormat
 
     // Default to JSON for unknown extensions
     return .json;
+}
+
+/// Load configuration from CLI arguments
+fn loadCli(config: *Config, cli_source: CliSource) FlareError!void {
+    const arena_allocator = config.getArenaAllocator();
+
+    // Parse CLI args in format: --key=value or --key value
+    var i: usize = 0;
+    while (i < cli_source.args.len) {
+        const arg = cli_source.args[i];
+
+        // Check if it starts with -- or -
+        if (std.mem.startsWith(u8, arg, "--")) {
+            const key_value = arg[2..]; // Skip --
+
+            // Check if it contains =
+            if (std.mem.indexOf(u8, key_value, "=")) |eq_pos| {
+                // Format: --key=value
+                const key = key_value[0..eq_pos];
+                const value_str = key_value[eq_pos + 1..];
+
+                // Convert key to config path (replace - with .)
+                const config_key = try convertCliKeyToConfigKey(arena_allocator, key);
+                const value = try parseCliValue(arena_allocator, value_str);
+                try config.setValue(config_key, value);
+            } else {
+                // Format: --key value (next arg is the value)
+                if (i + 1 < cli_source.args.len) {
+                    const key = key_value;
+                    const value_str = cli_source.args[i + 1];
+
+                    // Convert key to config path
+                    const config_key = try convertCliKeyToConfigKey(arena_allocator, key);
+                    const value = try parseCliValue(arena_allocator, value_str);
+                    try config.setValue(config_key, value);
+
+                    i += 1; // Skip the value arg
+                } else {
+                    // Boolean flag without value, treat as true
+                    const config_key = try convertCliKeyToConfigKey(arena_allocator, key_value);
+                    try config.setValue(config_key, Value{ .bool_value = true });
+                }
+            }
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            // Short flag format: -d or -p 8080
+            const flag = arg[1..]; // Skip -
+
+            if (i + 1 < cli_source.args.len and !std.mem.startsWith(u8, cli_source.args[i + 1], "-")) {
+                // Has a value
+                const value_str = cli_source.args[i + 1];
+                const value = try parseCliValue(arena_allocator, value_str);
+                try config.setValue(flag, value);
+                i += 1; // Skip the value
+            } else {
+                // Boolean flag
+                try config.setValue(flag, Value{ .bool_value = true });
+            }
+        }
+
+        i += 1;
+    }
+}
+
+/// Convert CLI key format to config key format
+/// e.g., "database-host" -> "database.host"
+fn convertCliKeyToConfigKey(allocator: std.mem.Allocator, cli_key: []const u8) ![]const u8 {
+    const result = try allocator.alloc(u8, cli_key.len);
+
+    for (cli_key, 0..) |c, i| {
+        result[i] = if (c == '-') '.' else c;
+    }
+
+    return result;
+}
+
+/// Parse CLI argument value into appropriate Value type
+fn parseCliValue(allocator: std.mem.Allocator, cli_value: []const u8) !Value {
+    // Try parsing as boolean first
+    if (std.mem.eql(u8, cli_value, "true") or std.mem.eql(u8, cli_value, "TRUE")) {
+        return Value{ .bool_value = true };
+    }
+    if (std.mem.eql(u8, cli_value, "false") or std.mem.eql(u8, cli_value, "FALSE")) {
+        return Value{ .bool_value = false };
+    }
+
+    // Try parsing as integer
+    if (std.fmt.parseInt(i64, cli_value, 10)) |int_val| {
+        return Value{ .int_value = int_val };
+    } else |_| {}
+
+    // Try parsing as float
+    if (std.fmt.parseFloat(f64, cli_value)) |float_val| {
+        return Value{ .float_value = float_val };
+    } else |_| {}
+
+    // Try parsing as JSON array or object
+    if ((std.mem.startsWith(u8, cli_value, "[") and std.mem.endsWith(u8, cli_value, "]")) or
+        (std.mem.startsWith(u8, cli_value, "{") and std.mem.endsWith(u8, cli_value, "}"))) {
+        // Attempt to parse as JSON
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, cli_value, .{}) catch {
+            // If JSON parsing fails, treat as string
+            const owned_string = try allocator.dupe(u8, cli_value);
+            return Value{ .string_value = owned_string };
+        };
+        defer parsed.deinit();
+
+        // Convert JSON value to our Value type (simplified)
+        return switch (parsed.value) {
+            .array => |arr| blk: {
+                var array_list: std.ArrayList(Value) = .{};
+                try array_list.ensureTotalCapacity(allocator, arr.items.len);
+                for (arr.items) |item| {
+                    const v = switch (item) {
+                        .string => |s| Value{ .string_value = try allocator.dupe(u8, s) },
+                        .integer => |i| Value{ .int_value = i },
+                        .float => |f| Value{ .float_value = f },
+                        .bool => |b| Value{ .bool_value = b },
+                        else => Value.null_value,
+                    };
+                    try array_list.append(allocator, v);
+                }
+                break :blk Value{ .array_value = array_list };
+            },
+            .object => |obj| blk: {
+                var map = std.StringHashMap(Value).init(allocator);
+                for (obj.keys(), obj.values()) |key, value| {
+                    const k = try allocator.dupe(u8, key);
+                    const v = switch (value) {
+                        .string => |s| Value{ .string_value = try allocator.dupe(u8, s) },
+                        .integer => |i| Value{ .int_value = i },
+                        .float => |f| Value{ .float_value = f },
+                        .bool => |b| Value{ .bool_value = b },
+                        else => Value.null_value,
+                    };
+                    try map.put(k, v);
+                }
+                break :blk Value{ .map_value = map };
+            },
+            else => blk: {
+                const owned_string = try allocator.dupe(u8, cli_value);
+                break :blk Value{ .string_value = owned_string };
+            },
+        };
+    }
+
+    // Default to string
+    const owned_string = try allocator.dupe(u8, cli_value);
+    return Value{ .string_value = owned_string };
 }
 
 /// Parse environment variable value into appropriate Value type

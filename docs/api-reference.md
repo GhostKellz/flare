@@ -284,6 +284,90 @@ pub fn setSchema(self: *Config, schema_def: *const Schema) void
 **Parameters:**
 - `schema_def` - Schema definition to set
 
+##### `getArray()`
+
+Get an array value by key path.
+
+```zig
+pub fn getArray(self: *Self, key: []const u8) FlareError!std.ArrayList(Value)
+```
+
+**Parameters:**
+- `key` - Configuration key for the array
+
+**Returns:** ArrayList of Values or `FlareError`
+
+**Example:**
+```zig
+const servers = try config.getArray("servers");
+for (servers.items) |server| {
+    // Process each server
+}
+```
+
+##### `getMap()`
+
+Get a map (object) value by key path.
+
+```zig
+pub fn getMap(self: *Self, key: []const u8) FlareError!std.StringHashMap(Value)
+```
+
+**Parameters:**
+- `key` - Configuration key for the object
+
+**Returns:** StringHashMap of Values or `FlareError`
+
+**Example:**
+```zig
+const db_config = try config.getMap("database");
+var iter = db_config.iterator();
+while (iter.next()) |entry| {
+    std.debug.print("{s}: {any}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+}
+```
+
+##### `getStringList()`
+
+Get a list of strings from an array.
+
+```zig
+pub fn getStringList(self: *Self, key: []const u8) FlareError![][]const u8
+```
+
+**Parameters:**
+- `key` - Configuration key for the array
+
+**Returns:** Slice of string values or `FlareError`
+
+**Example:**
+```zig
+const server_names = try config.getStringList("servers[*].name");
+for (server_names) |name| {
+    std.debug.print("Server: {s}\n", .{name});
+}
+```
+
+##### `getByIndex()`
+
+Get a value from an array by index.
+
+```zig
+pub fn getByIndex(self: *Self, key: []const u8, index: usize) FlareError!Value
+```
+
+**Parameters:**
+- `key` - Configuration key for the array
+- `index` - Zero-based array index
+
+**Returns:** Value at index or `FlareError.InvalidArrayIndex`
+
+**Example:**
+```zig
+const first_server = try config.getByIndex("servers", 0);
+const second_server = try config.getByIndex("servers", 1);
+```
+
 ### `Value`
 
 Union type representing configuration values.
@@ -295,6 +379,8 @@ pub const Value = union(enum) {
     int_value: i64,
     float_value: f64,
     string_value: []const u8,
+    array_value: std.ArrayList(Value),
+    map_value: std.StringHashMap(Value),
 };
 ```
 
@@ -304,6 +390,8 @@ pub const Value = union(enum) {
 - `int_value: i64` - Integer value
 - `float_value: f64` - Floating-point value
 - `string_value: []const u8` - String value
+- `array_value: std.ArrayList(Value)` - Array of values
+- `map_value: std.StringHashMap(Value)` - Map of values
 
 ## Schema System
 
@@ -538,14 +626,14 @@ Configuration loading options.
 pub const LoadOptions = struct {
     files: ?[]const FileSource = null,
     env: ?EnvSource = null,
-    cli: ?CliSource = null,  // Future: CLI argument support
+    cli: ?CliSource = null,
 };
 ```
 
 **Fields:**
 - `files` - Array of file sources to load
 - `env` - Environment variable configuration
-- `cli` - CLI argument configuration (not implemented)
+- `cli` - CLI argument configuration
 
 ### `FileSource`
 
@@ -595,6 +683,150 @@ pub const EnvSource = struct {
 **Fields:**
 - `prefix` - Required prefix for environment variables
 - `separator` - Separator for nested keys (default: "_")
+
+### `CliSource`
+
+CLI argument source configuration.
+
+```zig
+pub const CliSource = struct {
+    args: [][]const u8,
+};
+```
+
+**Fields:**
+- `args` - Array of command-line arguments to parse
+
+**Argument Formats Supported:**
+- `--key=value` - Long flag with equals
+- `--key value` - Long flag with space
+- `-k value` - Short flag with value
+- `--flag` - Boolean flag (sets to true)
+- `--servers='[{"name":"api"}]'` - JSON arrays/objects
+
+**Key Conversion:**
+- `--database-host` → `database.host`
+- `--log-level` → `log.level`
+
+**Example:**
+```zig
+const args = try std.process.argsAlloc(allocator);
+defer std.process.argsFree(allocator, args);
+
+var config = try flare.load(allocator, .{
+    .cli = .{ .args = args },
+});
+```
+
+## Flash CLI Integration
+
+### `flare.flash` Module
+
+The Flash integration bridge provides seamless integration with Flash CLI framework.
+
+### `FlashContext`
+
+Flash CLI context wrapper for Flare integration.
+
+```zig
+pub const FlashContext = struct {
+    args: [][]const u8,
+    flags: std.StringHashMap([]const u8),
+    command: ?[]const u8 = null,
+};
+```
+
+### `FlashConfigOptions`
+
+Options for Flash configuration integration.
+
+```zig
+pub const FlashConfigOptions = struct {
+    config_files: ?[]const FileSource = null,
+    env_source: ?EnvSource = null,
+    schema: ?*const Schema = null,
+};
+```
+
+### `initWithFlash()`
+
+Initialize Flare config with Flash CLI context.
+
+```zig
+pub fn initWithFlash(
+    allocator: std.mem.Allocator,
+    flash_context: FlashContext,
+    options: FlashConfigOptions,
+) !Config
+```
+
+**Parameters:**
+- `allocator` - Memory allocator
+- `flash_context` - Flash CLI context
+- `options` - Configuration options
+
+**Returns:** Configured Config instance
+
+**Example:**
+```zig
+const flash_ctx = FlashContext{
+    .args = &[_][]const u8{},
+    .flags = flags,
+    .command = "connect",
+};
+
+var config = try flare.flash.initWithFlash(allocator, flash_ctx, .{
+    .config_files = &[_]flare.FileSource{
+        .{ .path = "config.toml", .required = false },
+    },
+    .env_source = .{ .prefix = "MYAPP" },
+});
+```
+
+### `createConfigCommand()`
+
+Create a Flash command with Flare config integration.
+
+```zig
+pub fn createConfigCommand(
+    name: []const u8,
+    about: []const u8,
+    config_options: FlashConfigOptions,
+    flag_links: []const FlagLink,
+    handler: *const fn (context: CommandContext) anyerror!void,
+) ConfigAwareCommand
+```
+
+**Parameters:**
+- `name` - Command name
+- `about` - Command description
+- `config_options` - Configuration options
+- `flag_links` - Links between CLI flags and config keys
+- `handler` - Command handler function
+
+### `CommandContext`
+
+Command context with integrated configuration.
+
+```zig
+pub const CommandContext = struct {
+    flash_context: FlashContext,
+    config: *Config,
+    allocator: std.mem.Allocator,
+};
+```
+
+### `FlagLink`
+
+Helper to link Flash flags to config keys.
+
+```zig
+pub const FlagLink = struct {
+    flag_name: []const u8,
+    config_key: []const u8,
+    short: ?[]const u8 = null,
+};
+```
 
 ### `FlareError`
 

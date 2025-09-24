@@ -1,0 +1,28 @@
+# Flare Configuration Example
+# This demonstrates TOML configuration with Flash integration
+
+name = "flare-app"
+debug = false
+log_level = "info"
+
+[database]
+host = "localhost"
+port = 5432
+ssl = true
+pool_size = 20
+
+[server]
+host = "0.0.0.0"
+port = 8080
+timeout = 30.5
+
+# Arrays are supported
+[[servers]]
+name = "api-primary"
+url = "https://api.example.com"
+region = "us-east-1"
+
+[[servers]]
+name = "api-secondary"
+url = "https://api-backup.example.com"
+region = "us-west-2"

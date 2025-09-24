@@ -313,14 +313,197 @@ if (std.debug.runtime_safety) {
 }
 ```
 
+## Array Schemas
+
+Define schemas for arrays and validate their contents:
+
+```zig
+// Simple array of strings
+const tags_schema = flare.Schema.array(.{
+    .min_items = 1,
+    .max_items = 10,
+    .item_schema = &flare.Schema.string(.{ .min_length = 1 }),
+});
+
+// Array of server objects
+var server_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+
+const server_name = try allocator.create(flare.Schema);
+server_name.* = flare.Schema.string(.{}).required();
+
+const server_url = try allocator.create(flare.Schema);
+server_url.* = flare.Schema.string(.{ .pattern = "^https?://" }).required();
+
+try server_fields.put("name", server_name);
+try server_fields.put("url", server_url);
+
+const server_item_schema = try allocator.create(flare.Schema);
+server_item_schema.* = flare.Schema{
+    .schema_type = .object,
+    .fields = server_fields,
+};
+
+const servers_schema = flare.Schema.array(.{
+    .min_items = 1,
+    .item_schema = server_item_schema,
+});
+```
+
+### Working with Array Configuration
+
+```toml
+# config.toml
+tags = ["api", "database", "web"]
+
+[[servers]]
+name = "api-primary"
+url = "https://api1.example.com"
+region = "us-east-1"
+
+[[servers]]
+name = "api-secondary"
+url = "https://api2.example.com"
+region = "us-west-2"
+```
+
+```zig
+// Load and validate array configuration
+var config = try flare.Config.initWithSchema(allocator, &app_schema);
+defer config.deinit();
+
+// Load from TOML
+var toml_config = try flare.load(allocator, .{
+    .files = &[_]flare.FileSource{
+        .{ .path = "config.toml", .format = .toml },
+    },
+});
+defer toml_config.deinit();
+
+// Copy arrays to schema-aware config
+const tags = try toml_config.getArray("tags");
+try config.setValue("tags", flare.Value{ .array_value = tags });
+
+const servers = try toml_config.getArray("servers");
+try config.setValue("servers", flare.Value{ .array_value = servers });
+
+// Validate
+var result = try config.validateSchema();
+defer result.deinit(allocator);
+```
+
+## Advanced Schema Patterns
+
+### Conditional Schemas
+
+Create schemas that adapt based on configuration values:
+
+```zig
+// Database schema that varies by type
+fn createDatabaseSchema(allocator: std.mem.Allocator, db_type: []const u8) !flare.Schema {
+    var fields = std.StringHashMap(*const flare.Schema).init(allocator);
+
+    // Common fields
+    const host_schema = try allocator.create(flare.Schema);
+    host_schema.* = flare.Schema.string(.{}).required();
+    try fields.put("host", host_schema);
+
+    const port_schema = try allocator.create(flare.Schema);
+
+    if (std.mem.eql(u8, db_type, "postgresql")) {
+        port_schema.* = flare.Schema.int(.{ .min = 1, .max = 65535 })
+            .default(flare.Value{ .int_value = 5432 });
+    } else if (std.mem.eql(u8, db_type, "mysql")) {
+        port_schema.* = flare.Schema.int(.{ .min = 1, .max = 65535 })
+            .default(flare.Value{ .int_value = 3306 });
+    } else {
+        port_schema.* = flare.Schema.int(.{ .min = 1, .max = 65535 });
+    }
+
+    try fields.put("port", port_schema);
+
+    return flare.Schema{
+        .schema_type = .object,
+        .fields = fields,
+    };
+}
+```
+
+### Schema Composition
+
+Build complex schemas from simpler components:
+
+```zig
+fn createServerSchema(allocator: std.mem.Allocator) !flare.Schema {
+    return flare.Schema.object(allocator, .{
+        .name = flare.Schema.string(.{ .min_length = 1 }).required(),
+        .host = flare.Schema.string(.{}).required(),
+        .port = flare.Schema.int(.{ .min = 1, .max = 65535 }),
+        .ssl = flare.Schema.boolean().default(flare.Value{ .bool_value = true }),
+    });
+}
+
+fn createLoadBalancerSchema(allocator: std.mem.Allocator) !flare.Schema {
+    const server_schema = try createServerSchema(allocator);
+
+    return flare.Schema.object(allocator, .{
+        .algorithm = flare.Schema.string(.{})
+            .default(flare.Value{ .string_value = "round_robin" }),
+        .health_check_interval = flare.Schema.int(.{ .min = 1 })
+            .default(flare.Value{ .int_value = 30 }),
+        .servers = flare.Schema.array(.{
+            .min_items = 1,
+            .item_schema = &server_schema,
+        }).required(),
+    });
+}
+```
+
+### Environment-Specific Schemas
+
+```zig
+fn createEnvAwareSchema(allocator: std.mem.Allocator, environment: []const u8) !flare.Schema {
+    var fields = std.StringHashMap(*const flare.Schema).init(allocator);
+
+    // Common fields
+    const app_name = try allocator.create(flare.Schema);
+    app_name.* = flare.Schema.string(.{}).required();
+    try fields.put("name", app_name);
+
+    // Environment-specific requirements
+    if (std.mem.eql(u8, environment, "production")) {
+        // Production requires stricter validation
+        const log_level = try allocator.create(flare.Schema);
+        log_level.* = flare.Schema.string(.{})
+            .default(flare.Value{ .string_value = "warn" });
+        try fields.put("log_level", log_level);
+
+        // SSL required in production
+        const ssl_cert = try allocator.create(flare.Schema);
+        ssl_cert.* = flare.Schema.string(.{}).required();
+        try fields.put("ssl_cert_path", ssl_cert);
+    } else {
+        // Development allows more flexibility
+        const log_level = try allocator.create(flare.Schema);
+        log_level.* = flare.Schema.string(.{})
+            .default(flare.Value{ .string_value = "debug" });
+        try fields.put("log_level", log_level);
+    }
+
+    return flare.Schema{
+        .schema_type = .object,
+        .fields = fields,
+    };
+}
+```
+
 ## Future Features (Planned)
 
-- **Array schemas** - Validate lists and arrays
 - **Union types** - Multiple possible types for a field
-- **Conditional validation** - Field requirements based on other fields
 - **Custom validators** - User-defined validation functions
 - **Schema inheritance** - Extend existing schemas
 - **JSON Schema export** - Generate JSON Schema documents
+- **Pattern validation** - Full regex pattern matching for strings
+- **Cross-field validation** - Validate relationships between fields
 
 ## See Also
 

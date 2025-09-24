@@ -267,7 +267,7 @@ pub const ValidationResult = struct {
     warnings: std.ArrayList(ValidationWarning),
 
     pub fn init(allocator: std.mem.Allocator) ValidationResult {
-        _ = allocator; // Keep for future use
+        _ = allocator;
         return ValidationResult{
             .errors = std.ArrayList(ValidationError){},
             .warnings = std.ArrayList(ValidationWarning){},
@@ -275,7 +275,16 @@ pub const ValidationResult = struct {
     }
 
     pub fn deinit(self: *ValidationResult, allocator: std.mem.Allocator) void {
+        for (self.errors.items) |err| {
+            allocator.free(err.path);
+            allocator.free(err.message);
+        }
         self.errors.deinit(allocator);
+
+        for (self.warnings.items) |warn| {
+            allocator.free(warn.path);
+            allocator.free(warn.message);
+        }
         self.warnings.deinit(allocator);
     }
 
