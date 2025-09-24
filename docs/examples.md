@@ -1,6 +1,140 @@
 # Examples
 
-This document provides real-world examples of using Flare in different scenarios.
+Real-world examples of using Flare for configuration management with schema validation and TOML support.
+
+## Basic TOML Configuration
+
+Simple web server configuration using TOML format with schema validation.
+
+**config.toml:**
+```toml
+[app]
+name = "My Web Server"
+version = "1.0.0"
+debug = false
+
+[server]
+host = "0.0.0.0"
+port = 8080
+workers = 4
+
+[database]
+host = "localhost"
+port = 5432
+name = "webapp"
+ssl = true
+
+[database.pool]
+min_connections = 5
+max_connections = 20
+timeout = 30.0
+```
+
+**main.zig:**
+```zig
+const std = @import("std");
+const flare = @import("flare");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Define schema for validation
+    const schema = try createServerSchema(allocator);
+    defer destroySchema(allocator, schema);
+
+    // Load TOML configuration with schema validation
+    var config = try flare.Config.initWithSchema(allocator, &schema);
+    defer config.deinit();
+
+    // Load from TOML file (auto-detected format)
+    var file_config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{
+            .{ .path = "config.toml" }, // Auto-detected as TOML
+        },
+        .env = .{ .prefix = "SERVER", .separator = "__" },
+    });
+    defer file_config.deinit();
+
+    // Copy values to schema-aware config
+    try copyConfigValues(&config, &file_config);
+
+    // Validate against schema
+    var validation = try config.validateSchema();
+    defer validation.deinit(allocator);
+
+    if (validation.hasErrors()) {
+        std.debug.print("❌ Configuration validation failed:\n");
+        for (validation.errors.items) |error_item| {
+            std.debug.print("  - {s}\n", .{error_item.message});
+        }
+        return;
+    }
+
+    std.debug.print("✅ Configuration validated successfully!\n");
+
+    // Use validated configuration
+    const app_name = try config.getString("app_name", "Unknown");
+    const server_port = try config.getInt("server_port", 8080);
+    const db_host = try config.getString("database_host", "localhost");
+
+    std.debug.print("🚀 Starting {s} on port {d}\n", .{ app_name, server_port });
+    std.debug.print("📊 Database: {s}\n", .{db_host});
+}
+
+fn createServerSchema(allocator: std.mem.Allocator) !flare.Schema {
+    // Create app schema
+    var app_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+    const name_schema = try allocator.create(flare.Schema);
+    name_schema.* = flare.Schema.string(.{ .min_length = 1 }).required();
+    try app_fields.put("name", name_schema);
+
+    const app_schema = try allocator.create(flare.Schema);
+    app_schema.* = flare.Schema{ .schema_type = .object, .fields = app_fields };
+
+    // Create server schema
+    var server_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+    const port_schema = try allocator.create(flare.Schema);
+    port_schema.* = flare.Schema.int(.{ .min = 1, .max = 65535 }).required();
+    try server_fields.put("port", port_schema);
+
+    const server_schema = try allocator.create(flare.Schema);
+    server_schema.* = flare.Schema{ .schema_type = .object, .fields = server_fields };
+
+    // Create root schema
+    var root_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+    try root_fields.put("app", app_schema);
+    try root_fields.put("server", server_schema);
+
+    return flare.Schema{ .schema_type = .object, .fields = root_fields };
+}
+
+fn destroySchema(allocator: std.mem.Allocator, schema: flare.Schema) void {
+    // Cleanup schema memory - simplified for example
+    if (schema.fields) |fields| {
+        fields.deinit();
+    }
+}
+
+fn copyConfigValues(dest: *flare.Config, src: *flare.Config) !void {
+    // Copy key values from source to destination
+    // Simplified - in real code you'd iterate over all values
+    if (src.getValue("name")) |v| try dest.setValue("app_name", v);
+    if (src.getValue("server_port")) |v| try dest.setValue("server_port", v);
+    if (src.getValue("database_host")) |v| try dest.setValue("database_host", v);
+}
+```
+
+**Environment Overrides:**
+```bash
+# Override server port
+export SERVER__SERVER__PORT=3000
+
+# Override database settings
+export SERVER__DATABASE__HOST=prod-db.com
+export SERVER__DATABASE__SSL=true
+```
 
 ## Web Server Configuration
 

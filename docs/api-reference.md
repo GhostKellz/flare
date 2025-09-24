@@ -229,6 +229,61 @@ pub fn getCount(self: *Self) usize
 
 **Returns:** Number of configuration values loaded
 
+##### Schema-Related Methods
+
+##### `initWithSchema()`
+
+Create a Config instance with schema validation.
+
+```zig
+pub fn initWithSchema(allocator: std.mem.Allocator, schema_def: *const Schema) !Config
+```
+
+**Parameters:**
+- `allocator` - Memory allocator
+- `schema_def` - Schema definition for validation
+
+**Returns:** Schema-aware Config instance
+
+**Example:**
+```zig
+var config = try flare.Config.initWithSchema(allocator, &my_schema);
+defer config.deinit();
+```
+
+##### `validateSchema()`
+
+Validate configuration against schema (if present).
+
+```zig
+pub fn validateSchema(self: *Config) !ValidationResult
+```
+
+**Returns:** ValidationResult with errors/warnings
+
+**Example:**
+```zig
+var result = try config.validateSchema();
+defer result.deinit(allocator);
+
+if (result.hasErrors()) {
+    for (result.errors.items) |error_item| {
+        std.debug.print("Error: {s}\n", .{error_item.message});
+    }
+}
+```
+
+##### `setSchema()`
+
+Set or update the schema for this configuration.
+
+```zig
+pub fn setSchema(self: *Config, schema_def: *const Schema) void
+```
+
+**Parameters:**
+- `schema_def` - Schema definition to set
+
 ### `Value`
 
 Union type representing configuration values.
@@ -249,6 +304,231 @@ pub const Value = union(enum) {
 - `int_value: i64` - Integer value
 - `float_value: f64` - Floating-point value
 - `string_value: []const u8` - String value
+
+## Schema System
+
+### `Schema`
+
+Declarative configuration structure definition with validation.
+
+```zig
+pub const Schema = struct {
+    schema_type: SchemaType,
+    is_required: bool = false,
+    default_value: ?Value = null,
+    description: ?[]const u8 = null,
+    // Type-specific constraints...
+}
+```
+
+#### Schema Creation Methods
+
+##### `Schema.string()`
+
+Create a string schema with optional constraints.
+
+```zig
+pub fn string(constraints: StringConstraints) Schema
+```
+
+**Example:**
+```zig
+const name_schema = flare.Schema.string(.{
+    .min_length = 1,
+    .max_length = 100,
+});
+```
+
+##### `Schema.int()`
+
+Create an integer schema with optional constraints.
+
+```zig
+pub fn int(constraints: IntConstraints) Schema
+```
+
+**Example:**
+```zig
+const port_schema = flare.Schema.int(.{
+    .min = 1,
+    .max = 65535,
+});
+```
+
+##### `Schema.boolean()`
+
+Create a boolean schema.
+
+```zig
+pub fn boolean() Schema
+```
+
+**Example:**
+```zig
+const debug_schema = flare.Schema.boolean();
+```
+
+##### `Schema.float()`
+
+Create a float schema with optional constraints.
+
+```zig
+pub fn float(constraints: FloatConstraints) Schema
+```
+
+**Example:**
+```zig
+const timeout_schema = flare.Schema.float(.{
+    .min = 0.1,
+    .max = 300.0,
+});
+```
+
+##### `Schema.object()`
+
+Create an object schema with field definitions.
+
+```zig
+pub fn object(allocator: std.mem.Allocator, field_definitions: anytype) !Schema
+```
+
+**Example:**
+```zig
+const db_schema = try flare.Schema.object(allocator, .{
+    .host = flare.Schema.string(.{}).required(),
+    .port = flare.Schema.int(.{ .min = 1, .max = 65535 }),
+});
+```
+
+##### `Schema.root()`
+
+Create a root schema (same as object, semantically clearer).
+
+```zig
+pub fn root(allocator: std.mem.Allocator, field_definitions: anytype) !Schema
+```
+
+#### Method Chaining
+
+##### `required()`
+
+Mark the field as required.
+
+```zig
+pub fn required(self: Schema) Schema
+```
+
+**Example:**
+```zig
+const required_field = flare.Schema.string(.{}).required();
+```
+
+##### `default()`
+
+Set a default value for the field.
+
+```zig
+pub fn default(self: Schema, value: Value) Schema
+```
+
+**Example:**
+```zig
+const port_with_default = flare.Schema.int(.{})
+    .default(flare.Value{ .int_value = 8080 });
+```
+
+##### `withDescription()`
+
+Add a description to the field.
+
+```zig
+pub fn withDescription(self: Schema, desc: []const u8) Schema
+```
+
+### Constraint Types
+
+#### `StringConstraints`
+
+```zig
+pub const StringConstraints = struct {
+    min_length: ?usize = null,
+    max_length: ?usize = null,
+    pattern: ?[]const u8 = null, // Future: regex
+};
+```
+
+#### `IntConstraints`
+
+```zig
+pub const IntConstraints = struct {
+    min: ?i64 = null,
+    max: ?i64 = null,
+};
+```
+
+#### `FloatConstraints`
+
+```zig
+pub const FloatConstraints = struct {
+    min: ?f64 = null,
+    max: ?f64 = null,
+};
+```
+
+### `ValidationResult`
+
+Container for validation results.
+
+```zig
+pub const ValidationResult = struct {
+    errors: std.ArrayList(ValidationError),
+    warnings: std.ArrayList(ValidationWarning),
+}
+```
+
+#### Methods
+
+##### `hasErrors()`
+
+Check if validation found any errors.
+
+```zig
+pub fn hasErrors(self: *const ValidationResult) bool
+```
+
+##### `deinit()`
+
+Clean up validation result resources.
+
+```zig
+pub fn deinit(self: *ValidationResult, allocator: std.mem.Allocator) void
+```
+
+### `ValidationError`
+
+Individual validation error.
+
+```zig
+pub const ValidationError = struct {
+    path: []const u8,
+    message: []const u8,
+    error_type: SchemaError,
+};
+```
+
+### `SchemaError`
+
+Schema validation specific errors.
+
+```zig
+pub const SchemaError = error{
+    MissingRequiredField,
+    TypeMismatch,
+    ValueOutOfRange,
+    InvalidFormat,
+    ValidationFailed,
+};
+```
 
 ### `LoadOptions`
 
@@ -275,12 +555,31 @@ File source configuration.
 pub const FileSource = struct {
     path: []const u8,
     required: bool = true,
+    format: FileFormat = .auto,
 };
 ```
 
 **Fields:**
 - `path` - Path to the configuration file
 - `required` - Whether the file must exist (default: true)
+- `format` - File format (auto-detected by default)
+
+### `FileFormat`
+
+Supported configuration file formats.
+
+```zig
+pub const FileFormat = enum {
+    json,
+    toml,
+    auto, // Auto-detect from extension
+};
+```
+
+**Formats:**
+- `json` - JSON format
+- `toml` - TOML format
+- `auto` - Auto-detect from file extension (.json, .toml)
 
 ### `EnvSource`
 

@@ -21,13 +21,15 @@
 ## Features
 
 - 🏗️ **Arena-based memory management** - Efficient allocation and cleanup
-- 📁 **Multiple configuration sources** - JSON files, environment variables, defaults
+- 📁 **Multiple configuration sources** - JSON/TOML files, environment variables, defaults
 - 🎯 **Type-safe getters** - `getBool()`, `getInt()`, `getFloat()`, `getString()`
 - 🔄 **Smart type coercion** - Automatic conversion between compatible types
 - 🗂️ **Dotted key notation** - Access nested values with `db.host`, `server.port`
 - ⚡ **Zero-copy string handling** - Memory-efficient string operations
-- ✅ **Built-in validation** - Required key checking and type validation
+- ✅ **Schema validation** - Declarative configuration structure with constraints
+- 📋 **TOML support** - Full TOML parser with automatic format detection
 - 🌍 **Environment variable mapping** - `APP_DB__HOST` → `db.host`
+- 🔍 **Detailed error reporting** - Field path and constraint violation messages
 
 ## Quick Start
 
@@ -76,7 +78,21 @@ pub fn main() !void {
 
 ### Example Configuration File
 
-**config.json:**
+**config.toml:**
+```toml
+debug = false
+
+[database]
+host = "localhost"
+port = 5432
+ssl = true
+
+[server]
+host = "0.0.0.0"
+port = 8080
+```
+
+**Or config.json:**
 ```json
 {
   "database": {
@@ -100,6 +116,36 @@ Set environment variables with your configured prefix:
 export APP__DATABASE__HOST=production-db.example.com
 export APP__DATABASE__PORT=5432
 export APP__DEBUG=true
+```
+
+## Schema Validation
+
+Define and validate your configuration structure:
+
+```zig
+// Define schema
+const MySchema = try flare.Schema.root(allocator, .{
+    .database = try flare.Schema.object(allocator, .{
+        .host = flare.Schema.string(.{}).required(),
+        .port = flare.Schema.int(.{ .min = 1, .max = 65535 }),
+    }),
+    .debug = flare.Schema.boolean().default(flare.Value{ .bool_value = false }),
+});
+
+// Create schema-aware config
+var config = try flare.Config.initWithSchema(allocator, &MySchema);
+defer config.deinit();
+
+// Load and validate
+try loadConfigFromSources(&config);
+var validation = try config.validateSchema();
+defer validation.deinit(allocator);
+
+if (validation.hasErrors()) {
+    for (validation.errors.items) |error_item| {
+        std.debug.print("❌ {s}\n", .{error_item.message});
+    }
+}
 ```
 
 ## Configuration Precedence
@@ -166,10 +212,11 @@ pub fn main() !void {
 
 ## Documentation
 
-- [Getting Started Guide](docs/getting-started.md)
-- [Configuration Sources](docs/sources.md)
-- [API Reference](docs/api-reference.md)
-- [Examples](docs/examples.md)
+- [Getting Started Guide](docs/getting-started.md) - Basic setup and usage with schema validation
+- [Schema System](docs/schema.md) - Declarative configuration validation and constraints
+- [Configuration Sources](docs/sources.md) - JSON, TOML, environment variables, and precedence
+- [API Reference](docs/api-reference.md) - Complete API documentation with all methods
+- [Examples](docs/examples.md) - Real-world usage examples with TOML and schema validation
 
 ## Requirements
 

@@ -1,0 +1,12 @@
+name = "my-app"
+debug = false
+
+[database]
+host = "localhost"
+port = 5432
+ssl = true
+
+[server]
+host = "0.0.0.0"
+port = 8080
+timeout = 30.5

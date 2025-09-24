@@ -1,5 +1,7 @@
 # Getting Started with Flare
 
+**Flare** is a powerful configuration management library for Zig that provides hierarchical configuration loading, type-safe access, and schema validation. What Viper is to Cobra in Go, Flare is to Flash in Zig.
+
 This guide will walk you through setting up and using Flare in your Zig project.
 
 ## Installation

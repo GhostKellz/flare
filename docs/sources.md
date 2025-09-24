@@ -54,12 +54,55 @@ JSON objects are automatically flattened using underscore notation internally:
 
 Access as: `database.connection.host` or `database.connection.port`
 
+### TOML Files
+
+Flare fully supports TOML configuration files with automatic format detection:
+
+```zig
+var config = try flare.load(allocator, .{
+    .files = &[_]flare.FileSource{
+        .{ .path = "config.toml" },  // Auto-detected as TOML
+        .{ .path = "config.json" },  // Auto-detected as JSON
+    },
+});
+```
+
+**Example config.toml:**
+```toml
+name = "my-app"
+debug = false
+
+[database]
+host = "localhost"
+port = 5432
+ssl = true
+
+[server]
+host = "0.0.0.0"
+port = 8080
+timeout = 30.5
+```
+
+#### Format Detection
+
+- `.json` files → JSON parser
+- `.toml` files → TOML parser
+- Unknown extensions → JSON parser (default)
+
+#### Explicit Format Selection
+
+```zig
+.files = &[_]flare.FileSource{
+    .{ .path = "config.conf", .format = .toml },  // Force TOML
+    .{ .path = "data.txt", .format = .json },     // Force JSON
+}
+```
+
 ### Future File Format Support
 
 Planned support for additional formats:
 
-- **TOML** - Coming in v0.2.0
-- **YAML** - Coming in v0.2.0
+- **YAML** - Coming in v0.3.0
 
 ## Environment Variable Sources
 

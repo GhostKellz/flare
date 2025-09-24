@@ -3,6 +3,13 @@
 
 const std = @import("std");
 
+// Export schema and validation modules
+pub const Schema = @import("schema.zig").Schema;
+pub const SchemaError = @import("schema.zig").SchemaError;
+pub const ValidationResult = @import("schema.zig").ValidationResult;
+pub const Validator = @import("validator.zig").Validator;
+pub const validateConfig = @import("validator.zig").validateConfig;
+
 /// Flare error types
 pub const FlareError = error{
     ParseError,
@@ -13,6 +20,7 @@ pub const FlareError = error{
     OutOfMemory,
     InvalidPath,
     InvalidArrayIndex,
+    InvalidFormat,
 };
 
 /// Configuration value types
@@ -31,6 +39,7 @@ pub const Config = struct {
     arena: *std.heap.ArenaAllocator,
     data: std.StringHashMap(Value),
     defaults: std.StringHashMap(Value),
+    schema_def: ?*const Schema = null,
 
     const Self = @This();
 
@@ -45,7 +54,15 @@ pub const Config = struct {
             .arena = arena,
             .data = std.StringHashMap(Value).init(arena_allocator),
             .defaults = std.StringHashMap(Value).init(arena_allocator),
+            .schema_def = null,
         };
+    }
+
+    /// Initialize a new Config instance with schema validation
+    pub fn initWithSchema(allocator: std.mem.Allocator, schema_def: *const Schema) !Self {
+        var config = try init(allocator);
+        config.schema_def = schema_def;
+        return config;
     }
 
     /// Clean up resources - arena allocator handles all memory cleanup
@@ -56,7 +73,7 @@ pub const Config = struct {
     }
 
     /// Get arena allocator for config operations
-    fn getArenaAllocator(self: *Self) std.mem.Allocator {
+    pub fn getArenaAllocator(self: *Self) std.mem.Allocator {
         return self.arena.allocator();
     }
 
@@ -125,7 +142,7 @@ pub const Config = struct {
     }
 
     /// Internal helper to get a value by key, checking data first, then defaults
-    fn getValue(self: *Self, key: []const u8) ?Value {
+    pub fn getValue(self: *Self, key: []const u8) ?Value {
         // First try the direct key lookup
         if (self.data.get(key)) |value| {
             return value;
@@ -196,6 +213,21 @@ pub const Config = struct {
     pub fn getCount(self: *Self) usize {
         return self.data.count() + self.defaults.count();
     }
+
+    /// Validate configuration against schema (if present)
+    pub fn validateSchema(self: *Self) !ValidationResult {
+        if (self.schema_def) |schema_def| {
+            return validateConfig(self.allocator, self, schema_def);
+        } else {
+            // No schema defined, return empty result
+            return ValidationResult.init(self.allocator);
+        }
+    }
+
+    /// Set schema for this configuration
+    pub fn setSchema(self: *Self, schema_def: *const Schema) void {
+        self.schema_def = schema_def;
+    }
 };
 
 /// Load configuration from multiple sources
@@ -205,9 +237,16 @@ pub const LoadOptions = struct {
     cli: ?CliSource = null,
 };
 
+pub const FileFormat = enum {
+    json,
+    toml,
+    auto, // Auto-detect from extension
+};
+
 pub const FileSource = struct {
     path: []const u8,
     required: bool = true,
+    format: FileFormat = .auto,
 };
 
 pub const EnvSource = struct {
@@ -248,7 +287,7 @@ pub fn load(allocator: std.mem.Allocator, options: LoadOptions) FlareError!Confi
     return config;
 }
 
-/// Load configuration from a JSON file
+/// Load configuration from a file (JSON or TOML)
 fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
     const file = std.fs.cwd().openFile(file_source.path, .{}) catch |err| switch (err) {
         error.FileNotFound => return FlareError.Io,
@@ -262,12 +301,28 @@ fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
 
     _ = file.readAll(contents) catch return FlareError.Io;
 
-    // Parse JSON using arena allocator
-    const parsed = std.json.parseFromSlice(std.json.Value, arena_allocator, contents, .{}) catch return FlareError.ParseError;
-    defer parsed.deinit();
+    // Determine file format
+    const format = determineFileFormat(file_source.path, file_source.format);
 
-    // Convert JSON to config values
-    try loadJsonObject(config, "", parsed.value);
+    switch (format) {
+        .json => {
+            // Parse JSON using arena allocator
+            const parsed = std.json.parseFromSlice(std.json.Value, arena_allocator, contents, .{}) catch return FlareError.ParseError;
+            defer parsed.deinit();
+
+            // Convert JSON to config values
+            try loadJsonObject(config, "", parsed.value);
+        },
+        .toml => {
+            // Import TOML module
+            const toml = @import("toml.zig");
+            try toml.loadTomlIntoConfig(config, contents);
+        },
+        .auto => {
+            // This should not happen after determineFileFormat
+            return FlareError.ParseError;
+        },
+    }
 }
 
 /// Recursively load JSON object into config
@@ -393,6 +448,23 @@ fn convertEnvKeyToConfigKey(allocator: std.mem.Allocator, env_key: []const u8, s
     }
 
     return result[0..write_pos];
+}
+
+/// Determine file format from path and explicit format setting
+fn determineFileFormat(path: []const u8, explicit_format: FileFormat) FileFormat {
+    if (explicit_format != .auto) {
+        return explicit_format;
+    }
+
+    // Auto-detect from file extension
+    if (std.mem.endsWith(u8, path, ".json")) {
+        return .json;
+    } else if (std.mem.endsWith(u8, path, ".toml")) {
+        return .toml;
+    }
+
+    // Default to JSON for unknown extensions
+    return .json;
 }
 
 /// Parse environment variable value into appropriate Value type
@@ -551,4 +623,9 @@ test "validation and introspection" {
     const missing_keys = [_][]const u8{ "required_key", "missing_key" };
     const validation_result = config.validateRequired(&missing_keys);
     try std.testing.expectError(FlareError.MissingKey, validation_result);
+}
+
+// Include integration tests
+comptime {
+    _ = @import("integration_tests.zig");
 }
