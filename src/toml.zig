@@ -46,12 +46,17 @@ pub const TomlParser = struct {
 
             // Check for section header [section]
             if (self.peek() == '[') {
+                // Free previous section name before allocating new one
+                if (current_section) |old_section| {
+                    self.allocator.free(old_section);
+                }
                 current_section = try self.parseSection();
                 continue;
             }
 
             // Parse key=value pair
             const key = try self.parseKey();
+            defer self.allocator.free(key); // Free key after use
             self.skipWhitespace();
 
             if (self.pos >= self.content.len or self.peek() != '=') {
@@ -70,6 +75,11 @@ pub const TomlParser = struct {
 
             try result.put(full_key, value);
             self.skipWhitespace();
+        }
+
+        // Free the last section name if it exists
+        if (current_section) |section| {
+            self.allocator.free(section);
         }
 
         return result;
@@ -201,11 +211,25 @@ pub const TomlParser = struct {
     }
 };
 
+/// Helper to properly deinit a TOML hashmap and free all allocated memory
+pub fn deinitTomlHashMap(map: *std.StringHashMap(root.Value), allocator: std.mem.Allocator) void {
+    var iter = map.iterator();
+    while (iter.next()) |entry| {
+        // Free the key
+        allocator.free(entry.key_ptr.*);
+        // Free string values if they exist
+        if (entry.value_ptr.* == .string_value) {
+            allocator.free(entry.value_ptr.*.string_value);
+        }
+    }
+    map.deinit();
+}
+
 /// Parse TOML content and load into a Config
 pub fn loadTomlIntoConfig(config: *root.Config, content: []const u8) !void {
     var parser = TomlParser.init(config.getArenaAllocator(), content);
     var values = try parser.parse();
-    defer values.deinit();
+    defer deinitTomlHashMap(&values, config.getArenaAllocator());
 
     var iter = values.iterator();
     while (iter.next()) |entry| {
@@ -230,7 +254,7 @@ test "basic toml parsing" {
 
     var parser = TomlParser.init(allocator, toml_content);
     var result = try parser.parse();
-    defer result.deinit();
+    defer deinitTomlHashMap(&result, allocator);
 
     // Test root level values
     const name = result.get("name").?;

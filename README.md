@@ -8,8 +8,8 @@
 [![Zig Version](https://img.shields.io/badge/Zig-0.16.0--dev-orange.svg?style=for-the-badge)](https://ziglang.org/download/)
 [![Flash CLI Integration](https://img.shields.io/badge/Flash%20CLI-Integration-gold.svg?style=for-the-badge)](https://github.com/ghostkellz/flash)
 
-[![Status](https://img.shields.io/badge/Status-MVP%20Complete-brightgreen.svg?style=for-the-badge)](https://github.com/ghostkellz/flare)
-[![Version](https://img.shields.io/badge/Version-0.1.0-green.svg?style=for-the-badge)](https://github.com/ghostkellz/flare/releases)
+[![Status](https://img.shields.io/badge/Status-RC%20Quality-brightgreen.svg?style=for-the-badge)](https://github.com/ghostkellz/flare)
+[![Version](https://img.shields.io/badge/Version-0.9.0--RC-green.svg?style=for-the-badge)](https://github.com/ghostkellz/flare/releases)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
 **What Viper is to Cobra in Go, Flare is to Flash in Zig**
@@ -33,6 +33,8 @@
 - 💻 **CLI arguments parsing** - `--database-host=prod.com` with precedence control
 - ⚡ **Flash CLI integration** - Seamless integration with Flash framework
 - 🔍 **Detailed error reporting** - Field path and constraint violation messages
+- 🔄 **Hot reload support** - Watch and reload config files on changes
+- 💯 **Production ready** - Zero memory leaks, comprehensive test coverage
 
 ## Quick Start
 
@@ -202,6 +204,60 @@ Flare follows a clear precedence order (highest to lowest):
 4. **Default values** (lowest)
 
 Later sources override earlier ones for the same key.
+
+## Hot Reload
+
+Flare supports hot reloading configuration files without restarting your application:
+
+```zig
+const std = @import("std");
+const flare = @import("flare");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Load configuration
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{
+            .{ .path = "config.toml", .format = .toml },
+        },
+        .env = .{ .prefix = "APP", .separator = "__" },
+    });
+    defer config.deinit();
+
+    // Enable hot reload with optional callback
+    const reloadCallback = struct {
+        fn onReload(cfg: *flare.Config) void {
+            std.debug.print("Config reloaded!\n", .{});
+            // Update application state based on new config
+            _ = cfg;
+        }
+    }.onReload;
+
+    try config.enableHotReload(reloadCallback);
+
+    // In your main loop or periodic check
+    while (true) {
+        // Check if config files changed and reload if needed
+        const changed = try config.checkAndReload();
+        if (changed) {
+            std.debug.print("Configuration updated!\n", .{});
+        }
+
+        // Your application logic...
+        std.Thread.sleep(1_000_000_000); // 1 second
+    }
+}
+```
+
+**Features:**
+- Automatic file modification detection
+- Optional callbacks on config changes
+- Preserves default values during reload
+- Zero-allocation file watching
+- Thread-safe reload operations
 
 ## Flash CLI Integration
 

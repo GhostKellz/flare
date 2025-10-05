@@ -24,6 +24,7 @@ pub const FlareError = error{
     InvalidPath,
     InvalidArrayIndex,
     InvalidFormat,
+    WatcherNotInitialized,
 };
 
 /// Configuration value types
@@ -37,6 +38,15 @@ pub const Value = union(enum) {
     map_value: std.StringHashMap(Value),
 };
 
+/// Callback function type for config change notifications
+pub const ChangeCallback = *const fn (*Config) void;
+
+/// File watcher state for hot reload
+pub const FileWatcher = struct {
+    path: []const u8,
+    last_modified: i128, // nanoseconds since epoch
+};
+
 /// Core configuration type with immutable snapshot and memory pool
 pub const Config = struct {
     allocator: std.mem.Allocator,
@@ -44,6 +54,9 @@ pub const Config = struct {
     data: std.StringHashMap(Value),
     defaults: std.StringHashMap(Value),
     schema_def: ?*const Schema = null,
+    watched_files: ?std.ArrayList(FileWatcher) = null,
+    load_options: ?LoadOptions = null,
+    change_callback: ?ChangeCallback = null,
 
     const Self = @This();
 
@@ -71,6 +84,13 @@ pub const Config = struct {
 
     /// Clean up resources - arena allocator handles all memory cleanup
     pub fn deinit(self: *Self) void {
+        if (self.watched_files) |*watchers| {
+            // Free each watched file path
+            for (watchers.items) |watcher| {
+                self.allocator.free(watcher.path);
+            }
+            watchers.deinit(self.allocator);
+        }
         const arena = self.arena;
         arena.deinit();
         self.allocator.destroy(arena);
@@ -320,6 +340,92 @@ pub const Config = struct {
     pub fn setSchema(self: *Self, schema_def: *const Schema) void {
         self.schema_def = schema_def;
     }
+
+    /// Enable hot reload for configuration files
+    /// This initializes file watching for all loaded config files
+    pub fn enableHotReload(self: *Self, callback: ?ChangeCallback) !void {
+        if (self.load_options == null) {
+            return FlareError.WatcherNotInitialized;
+        }
+
+        self.change_callback = callback;
+        self.watched_files = std.ArrayList(FileWatcher){};
+
+        // Initialize watchers for all config files
+        if (self.load_options.?.files) |files| {
+            for (files) |file_source| {
+                const stat = std.fs.cwd().statFile(file_source.path) catch continue;
+                const watcher = FileWatcher{
+                    .path = try self.allocator.dupe(u8, file_source.path),
+                    .last_modified = stat.mtime,
+                };
+                try self.watched_files.?.append(self.allocator, watcher);
+            }
+        }
+    }
+
+    /// Check if any watched files have changed and reload if necessary
+    /// Returns true if config was reloaded
+    pub fn checkAndReload(self: *Self) !bool {
+        if (self.watched_files == null) {
+            return false;
+        }
+
+        var changed = false;
+        for (self.watched_files.?.items) |*watcher| {
+            const stat = std.fs.cwd().statFile(watcher.path) catch continue;
+
+            if (stat.mtime > watcher.last_modified) {
+                changed = true;
+                watcher.last_modified = stat.mtime;
+            }
+        }
+
+        if (changed and self.load_options != null) {
+            // Reload configuration
+            try self.reload();
+
+            // Call callback if registered
+            if (self.change_callback) |callback| {
+                callback(self);
+            }
+        }
+
+        return changed;
+    }
+
+    /// Reload configuration from original load options
+    pub fn reload(self: *Self) !void {
+        if (self.load_options == null) {
+            return FlareError.WatcherNotInitialized;
+        }
+
+        // Clear existing data (but keep defaults)
+        self.data.clearRetainingCapacity();
+
+        const options = self.load_options.?;
+
+        // Reload from files
+        if (options.files) |files| {
+            for (files) |file_source| {
+                loadFile(self, file_source) catch |err| {
+                    if (file_source.required) {
+                        return err;
+                    }
+                };
+            }
+        }
+
+        // Reload from environment variables
+        if (options.env) |env_source| {
+            try loadEnv(self, env_source);
+        }
+
+        // Reload from CLI args
+        if (options.cli) |cli_source| {
+            try loadCli(self, cli_source);
+        }
+    }
 };
 
 /// Load configuration from multiple sources
@@ -353,6 +459,9 @@ pub const CliSource = struct {
 /// Main entry point to load configuration
 pub fn load(allocator: std.mem.Allocator, options: LoadOptions) FlareError!Config {
     var config = Config.init(allocator) catch return FlareError.OutOfMemory;
+
+    // Store load options for hot reload capability
+    config.load_options = options;
 
     // Load from files first (lowest precedence)
     if (options.files) |files| {
@@ -916,4 +1025,5 @@ test "validation and introspection" {
 // Include integration tests
 comptime {
     _ = @import("integration_tests.zig");
+    _ = @import("hot_reload_tests.zig");
 }
