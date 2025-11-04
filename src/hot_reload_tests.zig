@@ -77,7 +77,7 @@ test "hot reload file change detection" {
     try std.testing.expect(initial_value == 100);
 
     // Wait a bit to ensure different mtime
-    std.Thread.sleep(1_000_000_000); // 1 second
+    std.posix.nanosleep(1, 0); // 1 second
 
     // Update the config file
     const updated_content =
@@ -142,7 +142,7 @@ test "hot reload with callback" {
     try config.enableHotReload(testCallback);
 
     // Update the config file
-    std.Thread.sleep(1_000_000_000); // 1 second
+    std.posix.nanosleep(1, 0); // 1 second
     const updated_content =
         \\{
         \\  "counter": 2

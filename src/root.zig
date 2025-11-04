@@ -357,7 +357,7 @@ pub const Config = struct {
                 const stat = std.fs.cwd().statFile(file_source.path) catch continue;
                 const watcher = FileWatcher{
                     .path = try self.allocator.dupe(u8, file_source.path),
-                    .last_modified = stat.mtime,
+                    .last_modified = @as(i128, stat.mtime.nanoseconds),
                 };
                 try self.watched_files.?.append(self.allocator, watcher);
             }
@@ -374,10 +374,11 @@ pub const Config = struct {
         var changed = false;
         for (self.watched_files.?.items) |*watcher| {
             const stat = std.fs.cwd().statFile(watcher.path) catch continue;
+            const mtime_ns = @as(i128, stat.mtime.nanoseconds);
 
-            if (stat.mtime > watcher.last_modified) {
+            if (mtime_ns > watcher.last_modified) {
                 changed = true;
-                watcher.last_modified = stat.mtime;
+                watcher.last_modified = mtime_ns;
             }
         }
 
@@ -490,17 +491,11 @@ pub fn load(allocator: std.mem.Allocator, options: LoadOptions) FlareError!Confi
 
 /// Load configuration from a file (JSON or TOML)
 fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
-    const file = std.fs.cwd().openFile(file_source.path, .{}) catch |err| switch (err) {
+    const arena_allocator = config.getArenaAllocator();
+    const contents = std.fs.cwd().readFileAlloc(file_source.path, arena_allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return FlareError.Io,
         else => return FlareError.Io,
     };
-    defer file.close();
-
-    const file_size = file.getEndPos() catch return FlareError.Io;
-    const arena_allocator = config.getArenaAllocator();
-    const contents = arena_allocator.alloc(u8, file_size) catch return FlareError.OutOfMemory;
-
-    _ = file.readAll(contents) catch return FlareError.Io;
 
     // Determine file format
     const format = determineFileFormat(file_source.path, file_source.format);
