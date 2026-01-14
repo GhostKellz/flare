@@ -354,7 +354,7 @@ pub const Config = struct {
         // Initialize watchers for all config files
         if (self.load_options.?.files) |files| {
             for (files) |file_source| {
-                const stat = std.fs.cwd().statFile(file_source.path) catch continue;
+                const stat = std.Io.Dir.cwd().statFile(std.Options.debug_io, file_source.path, .{}) catch continue;
                 const watcher = FileWatcher{
                     .path = try self.allocator.dupe(u8, file_source.path),
                     .last_modified = @as(i128, stat.mtime.nanoseconds),
@@ -373,7 +373,7 @@ pub const Config = struct {
 
         var changed = false;
         for (self.watched_files.?.items) |*watcher| {
-            const stat = std.fs.cwd().statFile(watcher.path) catch continue;
+            const stat = std.Io.Dir.cwd().statFile(std.Options.debug_io, watcher.path, .{}) catch continue;
             const mtime_ns = @as(i128, stat.mtime.nanoseconds);
 
             if (mtime_ns > watcher.last_modified) {
@@ -451,6 +451,10 @@ pub const FileSource = struct {
 pub const EnvSource = struct {
     prefix: []const u8,
     separator: []const u8 = "_",
+    /// Optional pre-created environment map. If not provided, environment
+    /// loading will be skipped. In Zig 0.16+, pass your main function's
+    /// environ_map here.
+    env_map: ?*const std.process.Environ.Map = null,
 };
 
 pub const CliSource = struct {
@@ -492,7 +496,7 @@ pub fn load(allocator: std.mem.Allocator, options: LoadOptions) FlareError!Confi
 /// Load configuration from a file (JSON or TOML)
 fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
     const arena_allocator = config.getArenaAllocator();
-    const contents = std.fs.cwd().readFileAlloc(file_source.path, arena_allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch |err| switch (err) {
+    const contents = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, file_source.path, arena_allocator, .limited(10 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return FlareError.Io,
         else => return FlareError.Io,
     };
@@ -620,9 +624,8 @@ fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Valu
 fn loadEnv(config: *Config, env_source: EnvSource) FlareError!void {
     const arena_allocator = config.getArenaAllocator();
 
-    // Get all environment variables
-    var env_map = std.process.getEnvMap(arena_allocator) catch return FlareError.OutOfMemory;
-    defer env_map.deinit();
+    // Get environment map - must be provided by caller in Zig 0.16+
+    const env_map = env_source.env_map orelse return; // Skip if no env_map provided
 
     var env_iter = env_map.iterator();
     while (env_iter.next()) |entry| {

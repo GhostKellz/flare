@@ -3,6 +3,19 @@
 const std = @import("std");
 const flare = @import("root.zig");
 
+const io = std.Options.debug_io;
+const Dir = std.Io.Dir;
+
+fn createTestFile(path: []const u8, content: []const u8) !void {
+    const file = try Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, content);
+}
+
+fn deleteTestFile(path: []const u8) void {
+    Dir.cwd().deleteFile(io, path) catch {};
+}
+
 test "hot reload initialization" {
     const allocator = std.testing.allocator;
 
@@ -19,10 +32,8 @@ test "hot reload initialization" {
     ;
 
     // Write initial config
-    const file = try std.fs.cwd().createFile(test_config_path, .{});
-    try file.writeAll(initial_content);
-    file.close();
-    defer std.fs.cwd().deleteFile(test_config_path) catch {};
+    try createTestFile(test_config_path, initial_content);
+    defer deleteTestFile(test_config_path);
 
     // Load config with file watching enabled
     var config = try flare.load(allocator, .{
@@ -54,12 +65,8 @@ test "hot reload file change detection" {
     ;
 
     // Write initial config
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(initial_content);
-    }
-    defer std.fs.cwd().deleteFile(test_config_path) catch {};
+    try createTestFile(test_config_path, initial_content);
+    defer deleteTestFile(test_config_path);
 
     // Load config
     var config = try flare.load(allocator, .{
@@ -77,7 +84,7 @@ test "hot reload file change detection" {
     try std.testing.expect(initial_value == 100);
 
     // Wait a bit to ensure different mtime
-    std.posix.nanosleep(1, 0); // 1 second
+    std.Io.sleep(io, .fromSeconds(1), .awake) catch {};
 
     // Update the config file
     const updated_content =
@@ -85,11 +92,7 @@ test "hot reload file change detection" {
         \\  "value": 200
         \\}
     ;
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(updated_content);
-    }
+    try createTestFile(test_config_path, updated_content);
 
     // Check and reload
     const changed = try config.checkAndReload();
@@ -111,12 +114,8 @@ test "hot reload with callback" {
     ;
 
     // Write initial config
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(initial_content);
-    }
-    defer std.fs.cwd().deleteFile(test_config_path) catch {};
+    try createTestFile(test_config_path, initial_content);
+    defer deleteTestFile(test_config_path);
 
     // Load config
     var config = try flare.load(allocator, .{
@@ -142,17 +141,13 @@ test "hot reload with callback" {
     try config.enableHotReload(testCallback);
 
     // Update the config file
-    std.posix.nanosleep(1, 0); // 1 second
+    std.Io.sleep(io, .fromSeconds(1), .awake) catch {};
     const updated_content =
         \\{
         \\  "counter": 2
         \\}
     ;
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(updated_content);
-    }
+    try createTestFile(test_config_path, updated_content);
 
     // Check and reload - should trigger callback
     _ = try config.checkAndReload();
@@ -170,12 +165,8 @@ test "hot reload manual reload" {
     ;
 
     // Write initial config
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(initial_content);
-    }
-    defer std.fs.cwd().deleteFile(test_config_path) catch {};
+    try createTestFile(test_config_path, initial_content);
+    defer deleteTestFile(test_config_path);
 
     // Load config
     var config = try flare.load(allocator, .{
@@ -195,11 +186,7 @@ test "hot reload manual reload" {
         \\  "setting": "updated"
         \\}
     ;
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(updated_content);
-    }
+    try createTestFile(test_config_path, updated_content);
 
     // Manually reload
     try config.reload();
@@ -220,12 +207,8 @@ test "hot reload preserves defaults" {
     ;
 
     // Write initial config
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(initial_content);
-    }
-    defer std.fs.cwd().deleteFile(test_config_path) catch {};
+    try createTestFile(test_config_path, initial_content);
+    defer deleteTestFile(test_config_path);
 
     // Load config
     var config = try flare.load(allocator, .{
@@ -250,11 +233,7 @@ test "hot reload preserves defaults" {
         \\  "dynamic": "value2"
         \\}
     ;
-    {
-        const file = try std.fs.cwd().createFile(test_config_path, .{});
-        defer file.close();
-        try file.writeAll(updated_content);
-    }
+    try createTestFile(test_config_path, updated_content);
 
     // Reload
     try config.reload();
