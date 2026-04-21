@@ -13,6 +13,66 @@ pub const validateConfig = @import("validator.zig").validateConfig;
 // Export Flash bridge module
 pub const flash = @import("flash_bridge.zig");
 
+// Export native TOML types (full TOML 1.0 support)
+pub const toml_value = @import("toml_value.zig");
+pub const TomlValue = toml_value.TomlValue;
+pub const TomlTable = toml_value.TomlTable;
+pub const TomlArray = toml_value.TomlArray;
+pub const Datetime = toml_value.Datetime;
+pub const Date = toml_value.Date;
+pub const Time = toml_value.Time;
+pub const tomlValueToFlareValue = toml_value.tomlValueToFlareValue;
+pub const flareValueToTomlValue = toml_value.flareValueToTomlValue;
+
+// Export TOML lexer and parser (full TOML 1.0 parser)
+pub const toml_lexer = @import("toml_lexer.zig");
+pub const toml_parser = @import("toml_parser.zig");
+pub const parseToml = toml_parser.parseToml;
+pub const parseTomlWithContext = toml_parser.parseTomlWithContext;
+pub const ParseError = toml_parser.ParseError;
+pub const ParseResult = toml_parser.ParseResult;
+pub const ErrorContext = toml_parser.ErrorContext;
+
+// Export struct deserialization
+pub const deserialize_mod = @import("deserialize.zig");
+pub const parseInto = deserialize_mod.parseInto;
+pub const deserialize = deserialize_mod.deserialize;
+pub const freeDeserialized = deserialize_mod.free;
+pub const DeserializeError = deserialize_mod.DeserializeError;
+
+// Export TOML stringification
+pub const stringify_mod = @import("stringify.zig");
+pub const stringify = stringify_mod.stringify;
+pub const stringifyWithOptions = stringify_mod.stringifyWithOptions;
+pub const FormatOptions = stringify_mod.FormatOptions;
+pub const StringifyError = stringify_mod.StringifyError;
+
+// Export TOML to JSON conversion
+pub const convert = @import("convert.zig");
+pub const toJSON = convert.toJSON;
+pub const toJSONPretty = convert.toJSONPretty;
+pub const ConvertError = convert.ConvertError;
+
+// Export TOML diff and merge utilities
+pub const diff_mod = @import("diff.zig");
+pub const diff = diff_mod.diff;
+pub const merge = diff_mod.merge;
+pub const Diff = diff_mod.Diff;
+pub const DiffType = diff_mod.DiffType;
+pub const DiffResult = diff_mod.DiffResult;
+pub const DiffError = diff_mod.DiffError;
+pub const MergeError = diff_mod.MergeError;
+
+// Export schema generation from types
+pub const schema_gen = @import("schema_gen.zig");
+pub const schemaFrom = schema_gen.schemaFrom;
+pub const TomlSchema = schema_gen.TomlSchema;
+pub const FieldSchema = schema_gen.FieldSchema;
+pub const ValueType = schema_gen.ValueType;
+pub const Constraint = schema_gen.Constraint;
+pub const SchemaBuilder = schema_gen.SchemaBuilder;
+pub const TomlValidationResult = schema_gen.TomlValidationResult;
+
 /// Flare error types
 pub const FlareError = error{
     ParseError,
@@ -224,25 +284,32 @@ pub const Config = struct {
     }
 
     /// Helper to navigate nested paths (e.g., "db.host", "servers[0]")
+    /// Uses stack buffer to avoid arena allocation on every read
     fn getValueByPath(self: *Self, path: []const u8) ?Value {
-        // For now, use a simple approach - replace dots with underscores
-        // and look up the flattened key
-        const arena_allocator = self.getArenaAllocator();
+        // Use stack buffer for dot-to-underscore transformation (256 bytes covers most keys)
+        var stack_buffer: [256]u8 = undefined;
 
-        // Calculate required buffer size
-        const new_len = path.len;
-        const buffer = arena_allocator.alloc(u8, new_len) catch return null;
-
-        // Copy and replace dots with underscores
-        for (path, 0..) |c, i| {
-            buffer[i] = if (c == '.') '_' else c;
-        }
+        const key = if (path.len <= stack_buffer.len) blk: {
+            // Common case: use stack buffer (zero allocation)
+            for (path, 0..) |c, i| {
+                stack_buffer[i] = if (c == '.') '_' else c;
+            }
+            break :blk stack_buffer[0..path.len];
+        } else blk: {
+            // Rare case: very long key, fall back to arena allocation
+            const arena_allocator = self.getArenaAllocator();
+            const heap_buffer = arena_allocator.alloc(u8, path.len) catch return null;
+            for (path, 0..) |c, i| {
+                heap_buffer[i] = if (c == '.') '_' else c;
+            }
+            break :blk heap_buffer;
+        };
 
         // Try the flattened key in both data and defaults
-        if (self.data.get(buffer)) |value| {
+        if (self.data.get(key)) |value| {
             return value;
         }
-        return self.defaults.get(buffer);
+        return self.defaults.get(key);
     }
 
     /// Set a value in the config (used by loaders)
@@ -256,7 +323,7 @@ pub const Config = struct {
             .float_value => |f| Value{ .float_value = f },
             .string_value => |s| Value{ .string_value = try arena_allocator.dupe(u8, s) },
             .array_value => |arr| blk: {
-                var new_array: std.ArrayList(Value) = .{};
+                var new_array: std.ArrayList(Value) = .empty;
                 try new_array.ensureTotalCapacity(arena_allocator, arr.items.len);
                 for (arr.items) |item| {
                     try new_array.append(arena_allocator, try self.cloneValue(item));
@@ -277,34 +344,62 @@ pub const Config = struct {
         try self.data.put(owned_key, owned_value);
     }
 
-    /// Helper to clone a value for storage
+    /// Helper to clone a value for storage (uses arena allocator)
     fn cloneValue(self: *Self, value: Value) !Value {
-        const arena_allocator = self.getArenaAllocator();
+        return cloneValueWithAllocator(self.getArenaAllocator(), value);
+    }
+
+    /// Clone a value using a specific allocator
+    fn cloneValueWithAllocator(alloc: std.mem.Allocator, value: Value) !Value {
         return switch (value) {
             .null_value => .null_value,
             .bool_value => |b| Value{ .bool_value = b },
             .int_value => |i| Value{ .int_value = i },
             .float_value => |f| Value{ .float_value = f },
-            .string_value => |s| Value{ .string_value = try arena_allocator.dupe(u8, s) },
+            .string_value => |s| Value{ .string_value = try alloc.dupe(u8, s) },
             .array_value => |arr| blk: {
-                var new_array: std.ArrayList(Value) = .{};
-                try new_array.ensureTotalCapacity(arena_allocator, arr.items.len);
+                var new_array: std.ArrayList(Value) = .empty;
+                try new_array.ensureTotalCapacity(alloc, arr.items.len);
                 for (arr.items) |item| {
-                    try new_array.append(arena_allocator, try self.cloneValue(item));
+                    try new_array.append(alloc, try cloneValueWithAllocator(alloc, item));
                 }
                 break :blk Value{ .array_value = new_array };
             },
             .map_value => |map| blk: {
-                var new_map = std.StringHashMap(Value).init(arena_allocator);
+                var new_map = std.StringHashMap(Value).init(alloc);
                 var iter = map.iterator();
                 while (iter.next()) |entry| {
-                    const k = try arena_allocator.dupe(u8, entry.key_ptr.*);
-                    const v = try self.cloneValue(entry.value_ptr.*);
+                    const k = try alloc.dupe(u8, entry.key_ptr.*);
+                    const v = try cloneValueWithAllocator(alloc, entry.value_ptr.*);
                     try new_map.put(k, v);
                 }
                 break :blk Value{ .map_value = new_map };
             },
         };
+    }
+
+    /// Free a value that was allocated with a specific allocator
+    fn freeValueWithAllocator(alloc: std.mem.Allocator, value: Value) void {
+        switch (value) {
+            .string_value => |s| alloc.free(s),
+            .array_value => |arr| {
+                for (arr.items) |item| {
+                    freeValueWithAllocator(alloc, item);
+                }
+                var mutable_arr = arr;
+                mutable_arr.deinit(alloc);
+            },
+            .map_value => |map| {
+                var iter = map.iterator();
+                while (iter.next()) |entry| {
+                    alloc.free(entry.key_ptr.*);
+                    freeValueWithAllocator(alloc, entry.value_ptr.*);
+                }
+                var mutable_map = map;
+                mutable_map.deinit();
+            },
+            else => {},
+        }
     }
 
     /// Validate that all required keys are present
@@ -349,7 +444,7 @@ pub const Config = struct {
         }
 
         self.change_callback = callback;
-        self.watched_files = std.ArrayList(FileWatcher){};
+        self.watched_files = .empty;
 
         // Initialize watchers for all config files
         if (self.load_options.?.files) |files| {
@@ -396,13 +491,47 @@ pub const Config = struct {
     }
 
     /// Reload configuration from original load options
+    /// Resets arena to prevent unbounded memory growth while preserving defaults.
     pub fn reload(self: *Self) !void {
         if (self.load_options == null) {
             return FlareError.WatcherNotInitialized;
         }
 
-        // Clear existing data (but keep defaults)
-        self.data.clearRetainingCapacity();
+        // Step 1: Clone defaults to parent allocator (outside arena)
+        var saved_defaults = std.StringHashMap(Value).init(self.allocator);
+        defer {
+            // Free temporary copies after we're done
+            var iter = saved_defaults.iterator();
+            while (iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                freeValueWithAllocator(self.allocator, entry.value_ptr.*);
+            }
+            saved_defaults.deinit();
+        }
+
+        var defaults_iter = self.defaults.iterator();
+        while (defaults_iter.next()) |entry| {
+            const key = try self.allocator.dupe(u8, entry.key_ptr.*);
+            errdefer self.allocator.free(key);
+            const value = try cloneValueWithAllocator(self.allocator, entry.value_ptr.*);
+            try saved_defaults.put(key, value);
+        }
+
+        // Step 2: Reset arena to free all previous allocations
+        _ = self.arena.reset(.free_all);
+
+        // Step 3: Reinitialize hashmaps with fresh arena allocator
+        const arena_allocator = self.arena.allocator();
+        self.data = std.StringHashMap(Value).init(arena_allocator);
+        self.defaults = std.StringHashMap(Value).init(arena_allocator);
+
+        // Step 4: Restore defaults into fresh arena
+        var saved_iter = saved_defaults.iterator();
+        while (saved_iter.next()) |entry| {
+            const arena_key = try arena_allocator.dupe(u8, entry.key_ptr.*);
+            const arena_value = try cloneValueWithAllocator(arena_allocator, entry.value_ptr.*);
+            try self.defaults.put(arena_key, arena_value);
+        }
 
         const options = self.load_options.?;
 
@@ -514,9 +643,8 @@ fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
             try loadJsonObject(config, "", parsed.value);
         },
         .toml => {
-            // Import TOML module
-            const toml = @import("toml.zig");
-            try toml.loadTomlIntoConfig(config, contents);
+            // Use new TOML 1.0 parser
+            try loadTomlContent(config, contents);
         },
         .auto => {
             // This should not happen after determineFileFormat
@@ -525,11 +653,80 @@ fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
     }
 }
 
-/// Convert JSON value to flare Value
-fn jsonToValue(config: *Config, json_value: std.json.Value) FlareError!Value {
+/// Load TOML content using the new TOML 1.0 parser
+fn loadTomlContent(config: *Config, contents: []const u8) FlareError!void {
     const arena_allocator = config.getArenaAllocator();
+
+    // Parse using new TOML 1.0 parser
+    const toml_table = toml_parser.parseToml(arena_allocator, contents) catch {
+        return FlareError.ParseError;
+    };
+    defer {
+        toml_table.deinit();
+        arena_allocator.destroy(toml_table);
+    }
+
+    // Convert TomlTable to flattened Config entries
+    try loadTomlTable(config, toml_table, "");
+}
+
+/// Recursively convert TomlTable entries into Config with flattened keys
+/// Stores BOTH flattened keys AND nested map_value objects for getMap()/schema validation
+fn loadTomlTable(config: *Config, table: *const toml_value.TomlTable, prefix: []const u8) FlareError!void {
+    const arena_allocator = config.getArenaAllocator();
+    var it = table.map.iterator();
+
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const val = entry.value_ptr.*;
+
+        // Build full key path with underscore separator (matches JSON flattening)
+        const full_key = if (prefix.len == 0)
+            key
+        else
+            std.fmt.allocPrint(arena_allocator, "{s}_{s}", .{ prefix, key }) catch return FlareError.OutOfMemory;
+
+        switch (val) {
+            .table => |nested| {
+                // Recurse into nested tables for flattened keys
+                try loadTomlTable(config, nested, full_key);
+
+                // Also store the nested table as a map_value (for getMap() and schema validation)
+                const converted = toml_value.tomlValueToFlareValue(arena_allocator, val) catch return FlareError.OutOfMemory;
+                try config.setValue(full_key, converted);
+            },
+            .array => |arr| {
+                // Check if array of tables
+                if (arr.items.items.len > 0 and arr.items.items[0] == .table) {
+                    // Array of tables - store as array of maps
+                    var array_list: std.ArrayList(Value) = .empty;
+                    array_list.ensureTotalCapacity(arena_allocator, arr.items.items.len) catch return FlareError.OutOfMemory;
+                    for (arr.items.items) |item| {
+                        const converted = toml_value.tomlValueToFlareValue(arena_allocator, item) catch return FlareError.OutOfMemory;
+                        array_list.append(arena_allocator, converted) catch return FlareError.OutOfMemory;
+                    }
+                    try config.setValue(full_key, Value{ .array_value = array_list });
+                } else {
+                    // Regular array - convert directly
+                    const converted = toml_value.tomlValueToFlareValue(arena_allocator, val) catch return FlareError.OutOfMemory;
+                    try config.setValue(full_key, converted);
+                }
+            },
+            else => {
+                // Primitive values (string, integer, float, boolean, datetime, etc.)
+                const converted = toml_value.tomlValueToFlareValue(arena_allocator, val) catch return FlareError.OutOfMemory;
+                try config.setValue(full_key, converted);
+            },
+        }
+    }
+}
+
+/// Convert JSON value to flare Value
+/// Convert std.json.Value to flare.Value recursively (standalone version)
+/// Used by both file loading and CLI parsing
+fn jsonValueToValue(allocator: std.mem.Allocator, json_value: std.json.Value) FlareError!Value {
     return switch (json_value) {
-        .string => |s| Value{ .string_value = try arena_allocator.dupe(u8, s) },
+        .string => |s| Value{ .string_value = try allocator.dupe(u8, s) },
         .integer => |i| Value{ .int_value = i },
         .float => |f| Value{ .float_value = f },
         .bool => |b| Value{ .bool_value = b },
@@ -541,24 +738,24 @@ fn jsonToValue(config: *Config, json_value: std.json.Value) FlareError!Value {
                 if (std.fmt.parseFloat(f64, s)) |f| {
                     break :blk Value{ .float_value = f };
                 } else |_| {
-                    break :blk Value{ .string_value = try arena_allocator.dupe(u8, s) };
+                    break :blk Value{ .string_value = try allocator.dupe(u8, s) };
                 }
             }
         },
         .array => |arr| blk: {
-            var array_list: std.ArrayList(Value) = .{};
-            try array_list.ensureTotalCapacity(arena_allocator, arr.items.len);
+            var array_list: std.ArrayList(Value) = .empty;
+            try array_list.ensureTotalCapacity(allocator, arr.items.len);
             for (arr.items) |item| {
-                const element_value = try jsonToValue(config, item);
-                try array_list.append(arena_allocator, element_value);
+                const element_value = try jsonValueToValue(allocator, item);
+                try array_list.append(allocator, element_value);
             }
             break :blk Value{ .array_value = array_list };
         },
         .object => |obj| blk: {
-            var map = std.StringHashMap(Value).init(arena_allocator);
+            var map = std.StringHashMap(Value).init(allocator);
             for (obj.keys(), obj.values()) |key, value| {
-                const owned_key = try arena_allocator.dupe(u8, key);
-                const owned_value = try jsonToValue(config, value);
+                const owned_key = try allocator.dupe(u8, key);
+                const owned_value = try jsonValueToValue(allocator, value);
                 try map.put(owned_key, owned_value);
             }
             break :blk Value{ .map_value = map };
@@ -566,18 +763,33 @@ fn jsonToValue(config: *Config, json_value: std.json.Value) FlareError!Value {
     };
 }
 
+/// Convert std.json.Value to flare.Value using config's arena allocator
+fn jsonToValue(config: *Config, json_value: std.json.Value) FlareError!Value {
+    return jsonValueToValue(config.getArenaAllocator(), json_value);
+}
+
 /// Recursively load JSON object into config
+/// Stores BOTH flattened keys (e.g., "database_host") AND nested map_value objects
+/// This enables both dot notation access AND getMap()/schema validation
 fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Value) FlareError!void {
     switch (json_value) {
         .object => |obj| {
+            const arena_allocator = config.getArenaAllocator();
+
+            // Process children with flattened keys
             for (obj.keys(), obj.values()) |key, value| {
                 const full_key = if (prefix.len == 0)
                     key
                 else
-                    try std.fmt.allocPrint(config.getArenaAllocator(), "{s}_{s}", .{ prefix, key });
+                    try std.fmt.allocPrint(arena_allocator, "{s}_{s}", .{ prefix, key });
 
                 try loadJsonObject(config, full_key, value);
-                // No need to free - arena allocator handles cleanup
+            }
+
+            // Also store the object itself as a nested map_value (for getMap() and schema validation)
+            if (prefix.len > 0) {
+                const nested_map = try jsonToValue(config, json_value);
+                try config.setValue(prefix, nested_map);
             }
         },
         .string => |s| {
@@ -609,7 +821,7 @@ fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Valu
         },
         .array => |arr| {
             const arena_allocator = config.getArenaAllocator();
-            var array_list: std.ArrayList(Value) = .{};
+            var array_list: std.ArrayList(Value) = .empty;
             try array_list.ensureTotalCapacity(arena_allocator, arr.items.len);
             for (arr.items) |item| {
                 const element_value = try jsonToValue(config, item);
@@ -788,7 +1000,9 @@ fn convertCliKeyToConfigKey(allocator: std.mem.Allocator, cli_key: []const u8) !
 }
 
 /// Parse CLI argument value into appropriate Value type
-fn parseCliValue(allocator: std.mem.Allocator, cli_value: []const u8) !Value {
+/// Parse CLI argument value into appropriate Value type
+/// Handles booleans, integers, floats, JSON arrays/objects, and strings
+pub fn parseCliValue(allocator: std.mem.Allocator, cli_value: []const u8) !Value {
     // Try parsing as boolean first
     if (std.mem.eql(u8, cli_value, "true") or std.mem.eql(u8, cli_value, "TRUE")) {
         return Value{ .bool_value = true };
@@ -818,43 +1032,8 @@ fn parseCliValue(allocator: std.mem.Allocator, cli_value: []const u8) !Value {
         };
         defer parsed.deinit();
 
-        // Convert JSON value to our Value type (simplified)
-        return switch (parsed.value) {
-            .array => |arr| blk: {
-                var array_list: std.ArrayList(Value) = .{};
-                try array_list.ensureTotalCapacity(allocator, arr.items.len);
-                for (arr.items) |item| {
-                    const v = switch (item) {
-                        .string => |s| Value{ .string_value = try allocator.dupe(u8, s) },
-                        .integer => |i| Value{ .int_value = i },
-                        .float => |f| Value{ .float_value = f },
-                        .bool => |b| Value{ .bool_value = b },
-                        else => Value.null_value,
-                    };
-                    try array_list.append(allocator, v);
-                }
-                break :blk Value{ .array_value = array_list };
-            },
-            .object => |obj| blk: {
-                var map = std.StringHashMap(Value).init(allocator);
-                for (obj.keys(), obj.values()) |key, value| {
-                    const k = try allocator.dupe(u8, key);
-                    const v = switch (value) {
-                        .string => |s| Value{ .string_value = try allocator.dupe(u8, s) },
-                        .integer => |i| Value{ .int_value = i },
-                        .float => |f| Value{ .float_value = f },
-                        .bool => |b| Value{ .bool_value = b },
-                        else => Value.null_value,
-                    };
-                    try map.put(k, v);
-                }
-                break :blk Value{ .map_value = map };
-            },
-            else => blk: {
-                const owned_string = try allocator.dupe(u8, cli_value);
-                break :blk Value{ .string_value = owned_string };
-            },
-        };
+        // Convert JSON value to flare Value recursively (preserves nested structures)
+        return jsonValueToValue(allocator, parsed.value);
     }
 
     // Default to string
@@ -1024,4 +1203,13 @@ test "validation and introspection" {
 comptime {
     _ = @import("integration_tests.zig");
     _ = @import("hot_reload_tests.zig");
+    _ = @import("toml_value.zig");
+    _ = @import("toml_lexer.zig");
+    _ = @import("toml_parser.zig");
+    _ = @import("deserialize.zig");
+    _ = @import("stringify.zig");
+    _ = @import("schema_gen.zig");
+    _ = @import("flash_bridge.zig");
+    _ = @import("convert.zig");
+    _ = @import("diff.zig");
 }

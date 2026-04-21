@@ -2,6 +2,18 @@
 
 Real-world examples of using Flare for configuration management with schema validation, array support, CLI integration, and Flash framework compatibility.
 
+> **Note on Environment Variables**: Examples in this guide show simplified `.env` configurations. For actual environment variable loading, you must provide `env_map`:
+> ```zig
+> var env_map = try std.process.getEnvMap(allocator);
+> defer env_map.deinit();
+>
+> var config = try flare.load(allocator, .{
+>     .files = &config_files,
+>     .env = .{ .prefix = "APP", .separator = "__", .env_map = &env_map },
+> });
+> ```
+> Without `env_map`, environment variable loading is silently skipped.
+
 ## Basic TOML Configuration
 
 Simple web server configuration using TOML format with schema validation.
@@ -40,6 +52,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Define schema for validation
     const schema = try createServerSchema(allocator);
     defer destroySchema(allocator, schema);
@@ -53,7 +68,7 @@ pub fn main() !void {
         .files = &[_]flare.FileSource{
             .{ .path = "config.toml" }, // Auto-detected as TOML
         },
-        .env = .{ .prefix = "SERVER", .separator = "__" },
+        .env = .{ .prefix = "SERVER", .separator = "__", .env_map = &env_map },
     });
     defer file_config.deinit();
 
@@ -221,13 +236,16 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Load configuration with environment variable support
     var config = try flare.load(allocator, .{
         .files = &[_]flare.FileSource{
             .{ .path = "config.json", .required = true },
             .{ .path = "config.local.json", .required = false },
         },
-        .env = .{ .prefix = "MYAPP", .separator = "__" },
+        .env = .{ .prefix = "MYAPP", .separator = "__", .env_map = &env_map },
     });
     defer config.deinit();
 
@@ -342,11 +360,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     var config = try flare.load(allocator, .{
         .files = &[_]flare.FileSource{
             .{ .path = "service.json", .required = true },
         },
-        .env = .{ .prefix = "SERVICE", .separator = "_" },
+        .env = .{ .prefix = "SERVICE", .separator = "_", .env_map = &env_map },
     });
     defer config.deinit();
 
@@ -427,6 +448,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Get home directory for user config
     const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
         std.debug.print("Could not determine home directory\\n", .{});
@@ -441,7 +465,7 @@ pub fn main() !void {
         .files = &[_]flare.FileSource{
             .{ .path = config_path, .required = false },
         },
-        .env = .{ .prefix = "MYAPP", .separator = "_" },
+        .env = .{ .prefix = "MYAPP", .separator = "_", .env_map = &env_map },
     });
     defer config.deinit();
 
@@ -527,12 +551,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     var config = try flare.load(allocator, .{
         .files = &[_]flare.FileSource{
             .{ .path = "/app/config/default.json", .required = false },
             .{ .path = "/app/config/production.json", .required = false },
         },
-        .env = .{ .prefix = "APP", .separator = "__" },
+        .env = .{ .prefix = "APP", .separator = "__", .env_map = &env_map },
     });
     defer config.deinit();
 
@@ -611,11 +638,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     var config = try flare.load(allocator, .{
         .files = &[_]flare.FileSource{
             .{ .path = "config.json", .required = true },
         },
-        .env = .{ .prefix = "APP", .separator = "__" },
+        .env = .{ .prefix = "APP", .separator = "__", .env_map = &env_map },
     });
     defer config.deinit();
 
@@ -670,6 +700,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Define CLI application
     const cli = flash.CLI(.{
         .name = "dbtools",
@@ -683,7 +716,7 @@ pub fn main() !void {
             .{ .path = "config.toml", .required = false },
             .{ .path = "~/.dbtools/config.toml", .required = false },
         },
-        .env_source = .{ .prefix = "DBTOOLS", .separator = "_" },
+        .env_source = .{ .prefix = "DBTOOLS", .separator = "_", .env_map = &env_map },
     };
 
     // Add commands with configuration integration
@@ -941,11 +974,14 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     var config = try flare.load(allocator, .{
         .files = &[_]flare.FileSource{
             .{ .path = "config.toml", .required = false },
         },
-        .env = .{ .prefix = "APP", .separator = "__" },
+        .env = .{ .prefix = "APP", .separator = "__", .env_map = &env_map },
         .cli = .{ .args = args },
     });
     defer config.deinit();
@@ -1050,6 +1086,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Determine environment
     const env = std.process.getEnvVarOwned(allocator, "APP_ENV") catch "development";
     defer allocator.free(env);
@@ -1072,7 +1111,7 @@ pub fn main() !void {
     // Load with full precedence
     var config = try flare.load(allocator, .{
         .files = config_files.items,
-        .env = .{ .prefix = "APP", .separator = "__" },
+        .env = .{ .prefix = "APP", .separator = "__", .env_map = &env_map },
     });
     defer config.deinit();
 

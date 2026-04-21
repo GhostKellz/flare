@@ -104,13 +104,17 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // Get environment variables for loading
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Load configuration with full precedence chain
     var config = try flare.load(allocator, .{
         .files = &[_]flare.FileSource{
             .{ .path = "config.toml", .required = false, .format = .toml },
             .{ .path = "config.json", .required = false, .format = .json },
         },
-        .env = .{ .prefix = "APP", .separator = "__" },
+        .env = .{ .prefix = "APP", .separator = "__", .env_map = &env_map },
         .cli = .{ .args = try std.process.argsAlloc(allocator) },
     });
     defer config.deinit();
@@ -124,7 +128,6 @@ pub fn main() !void {
 
     // Access arrays and collections
     const servers = try config.getArray("servers");
-    const server_names = try config.getStringList("servers[*].name");
 
     std.debug.print("Starting {s}\\n", .{app_name});
     std.debug.print("Database: {s}:{d}\\n", .{ db_host, db_port });
@@ -139,13 +142,18 @@ pub fn main() !void {
 Flare can automatically load environment variables with a specified prefix:
 
 ```zig
+// Get environment map (required for env var loading)
+var env_map = try std.process.getEnvMap(allocator);
+defer env_map.deinit();
+
 var config = try flare.load(allocator, .{
     .files = &[_]flare.FileSource{
         .{ .path = "config.json", .required = false },
     },
     .env = .{
         .prefix = "MYAPP",
-        .separator = "_"
+        .separator = "_",
+        .env_map = &env_map,
     },
 });
 ```
@@ -287,13 +295,16 @@ const value = config.getString("some.key", null) catch |err| switch (err) {
 Load configuration from multiple files with precedence:
 
 ```zig
+var env_map = try std.process.getEnvMap(allocator);
+defer env_map.deinit();
+
 var config = try flare.load(allocator, .{
     .files = &[_]flare.FileSource{
         .{ .path = "config.json", .required = true },
         .{ .path = "config.local.json", .required = false },
         .{ .path = "config.production.json", .required = false },
     },
-    .env = .{ .prefix = "MYAPP", .separator = "_" },
+    .env = .{ .prefix = "MYAPP", .separator = "_", .env_map = &env_map },
 });
 ```
 
@@ -315,10 +326,11 @@ std.debug.print("Found {d} servers\n", .{servers.items.len});
 // Get array element by index
 const first_server = try config.getByIndex("servers", 0);
 
-// Get list of strings from array
-const server_names = try config.getStringList("servers[*].name");
-for (server_names) |name| {
-    std.debug.print("Server: {s}\n", .{name});
+// Iterate over array items to access nested values
+for (servers.items) |server| {
+    if (server.map_value.get("name")) |name| {
+        std.debug.print("Server: {s}\n", .{name.string_value});
+    }
 }
 ```
 
@@ -338,38 +350,60 @@ while (iter.next()) |entry| {
 Define schemas to validate your configuration structure:
 
 ```zig
-// Define a schema for your configuration
-const app_schema = try flare.Schema.root(allocator, .{
-    .database = flare.Schema.object(allocator, .{
-        .host = flare.Schema.string(.{}).required(),
-        .port = flare.Schema.int(.{ .min = 1, .max = 65535 }).default(flare.Value{ .int_value = 5432 }),
-        .ssl = flare.Schema.boolean().default(flare.Value{ .bool_value = true }),
-    }),
-    .servers = flare.Schema.array(.{
-        .min_items = 1,
-        .item_schema = &flare.Schema.object(allocator, .{
-            .name = flare.Schema.string(.{}).required(),
-            .url = flare.Schema.string(.{ .pattern = "^https?://" }),
-        }),
-    }),
-});
+const std = @import("std");
+const flare = @import("flare");
 
-// Create config with schema validation
-var config = try flare.Config.initWithSchema(allocator, &app_schema);
-defer config.deinit();
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-// Load configuration
-try flare.loadIntoConfig(&config, .{
-    .files = &[_]flare.FileSource{ .{ .path = "config.toml" } },
-});
+    // Define field schemas
+    const host_schema = flare.Schema.string(.{}).required();
+    const port_schema = flare.Schema.int(.{ .min = 1, .max = 65535 });
+    const name_schema = flare.Schema.string(.{}).required();
 
-// Validate against schema
-const validation = try config.validateSchema();
-defer validation.deinit();
+    // Build database object schema
+    var db_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+    defer db_fields.deinit();
 
-if (validation.hasErrors()) {
-    for (validation.errors.items) |err| {
-        std.debug.print("Validation error at {s}: {s}\n", .{ err.path, err.message });
+    const host_ptr = try allocator.create(flare.Schema);
+    host_ptr.* = host_schema;
+    try db_fields.put("host", host_ptr);
+
+    const port_ptr = try allocator.create(flare.Schema);
+    port_ptr.* = port_schema;
+    try db_fields.put("port", port_ptr);
+
+    // Build root schema
+    var root_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+    defer root_fields.deinit();
+
+    const name_ptr = try allocator.create(flare.Schema);
+    name_ptr.* = name_schema;
+    try root_fields.put("name", name_ptr);
+
+    const db_ptr = try allocator.create(flare.Schema);
+    db_ptr.* = flare.Schema{ .schema_type = .object, .fields = db_fields };
+    try root_fields.put("database", db_ptr);
+
+    const root_schema = flare.Schema{ .schema_type = .object, .fields = root_fields };
+
+    // Load configuration from file
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{ .{ .path = "config.toml" } },
+    });
+    defer config.deinit();
+
+    // Attach schema and validate
+    config.setSchema(&root_schema);
+    var validation = try config.validateSchema();
+    defer validation.deinit(allocator);
+
+    if (validation.hasErrors()) {
+        for (validation.errors.items) |err| {
+            std.debug.print("Validation error at {s}: {s}\n", .{ err.path, err.message });
+        }
     }
 }
 ```
@@ -379,6 +413,9 @@ if (validation.hasErrors()) {
 Integrate Flare seamlessly with Flash CLI applications:
 
 ```zig
+var env_map = try std.process.getEnvMap(allocator);
+defer env_map.deinit();
+
 const flash = @import("flash");
 const flare = @import("flare");
 
@@ -390,7 +427,7 @@ const connect_cmd = flare.flash.createConfigCommand(
         .config_files = &[_]flare.FileSource{
             .{ .path = "config.toml", .required = false },
         },
-        .env_source = .{ .prefix = "MYAPP", .separator = "_" },
+        .env_source = .{ .prefix = "MYAPP", .separator = "_", .env_map = &env_map },
         .schema = &database_schema,
     },
     &[_]flare.flash.FlagLink{

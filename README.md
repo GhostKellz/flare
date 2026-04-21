@@ -5,11 +5,11 @@
 <img src="assets/icons/flare.png" alt="Flare Logo" width="200" height="200">
 
 [![Built with Zig](https://img.shields.io/badge/Built%20with-Zig-yellow.svg?style=for-the-badge&logo=zig)](https://ziglang.org/)
-[![Zig Version](https://img.shields.io/badge/Zig-0.16.0--dev-orange.svg?style=for-the-badge)](https://ziglang.org/download/)
+[![Zig Version](https://img.shields.io/badge/Zig-0.17.0--dev-orange.svg?style=for-the-badge)](https://ziglang.org/download/)
 [![Flash CLI Integration](https://img.shields.io/badge/Flash%20CLI-Integration-gold.svg?style=for-the-badge)](https://github.com/ghostkellz/flash)
 
-[![Status](https://img.shields.io/badge/Status-RC%20Quality-brightgreen.svg?style=for-the-badge)](https://github.com/ghostkellz/flare)
-[![Version](https://img.shields.io/badge/Version-0.9.0--RC-green.svg?style=for-the-badge)](https://github.com/ghostkellz/flare/releases)
+[![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=for-the-badge)](https://github.com/ghostkellz/flare)
+[![Version](https://img.shields.io/badge/Version-0.2.0-green.svg?style=for-the-badge)](https://github.com/ghostkellz/flare/releases)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
 **What Viper is to Cobra in Go, Flare is to Flash in Zig**
@@ -28,13 +28,13 @@
 - 📊 **Array & object support** - Native handling of lists and nested structures
 - ⚡ **Zero-copy string handling** - Memory-efficient string operations
 - ✅ **Schema validation** - Declarative configuration structure with constraints
-- 📋 **TOML support** - Full TOML parser with automatic format detection
+- 📋 **Full TOML 1.0 support** - Complete parser with nested tables, arrays of tables, inline tables, datetime types
 - 🌍 **Environment variable mapping** - `APP_DB__HOST` → `db.host`
 - 💻 **CLI arguments parsing** - `--database-host=prod.com` with precedence control
 - ⚡ **Flash CLI integration** - Seamless integration with Flash framework
 - 🔍 **Detailed error reporting** - Field path and constraint violation messages
-- 🔄 **Hot reload support** - Watch and reload config files on changes
-- 💯 **Production ready** - Zero memory leaks, comprehensive test coverage
+- 🔄 **Hot reload support** - Watch and reload config files on changes with proper memory management
+- 💯 **Production ready** - Comprehensive test coverage, arena-based memory management
 
 ## Quick Start
 
@@ -58,22 +58,18 @@ zig fetch --save https://github.com/ghostkellz/flash/archive/refs/heads/main.tar
 const std = @import("std");
 const flare = @import("flare");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// Zig 0.17+: Use Init signature to receive allocator and environ_map
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Load configuration from multiple sources with full precedence
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
     var config = try flare.load(allocator, .{
         .files = &[_]flare.FileSource{
             .{ .path = "config.toml", .format = .toml },
             .{ .path = "config.json", .format = .json },
         },
-        .env = .{ .prefix = "APP", .separator = "__" },
-        .cli = .{ .args = args },
+        // Pass environ_map for environment variable loading (APP__DATABASE__HOST, etc.)
+        .env = .{ .prefix = "APP", .separator = "__", .env_map = init.environ_map },
     });
     defer config.deinit();
 
@@ -84,9 +80,9 @@ pub fn main() !void {
 
     // Access arrays and nested objects
     const servers = try config.getArray("servers");
-    std.debug.print("Found {d} servers\\n", .{servers.items.len});
+    std.debug.print("Found {d} servers\n", .{servers.items.len});
 
-    std.debug.print("Connecting to {s}:{d} (debug: {})\\n", .{ db_host, db_port, debug });
+    std.debug.print("Connecting to {s}:{d} (debug: {})\n", .{ db_host, db_port, debug });
 }
 ```
 
@@ -169,27 +165,55 @@ Or override with CLI arguments (highest precedence):
 Define and validate your configuration structure:
 
 ```zig
-// Define schema
-const MySchema = try flare.Schema.root(allocator, .{
-    .database = try flare.Schema.object(allocator, .{
-        .host = flare.Schema.string(.{}).required(),
-        .port = flare.Schema.int(.{ .min = 1, .max = 65535 }),
-    }),
-    .debug = flare.Schema.boolean().default(flare.Value{ .bool_value = false }),
-});
+const std = @import("std");
+const flare = @import("flare");
 
-// Create schema-aware config
-var config = try flare.Config.initWithSchema(allocator, &MySchema);
-defer config.deinit();
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-// Load and validate
-try loadConfigFromSources(&config);
-var validation = try config.validateSchema();
-defer validation.deinit(allocator);
+    // Build field schemas
+    const host_schema = flare.Schema.string(.{}).required();
+    const port_schema = flare.Schema.int(.{ .min = 1, .max = 65535 });
 
-if (validation.hasErrors()) {
-    for (validation.errors.items) |error_item| {
-        std.debug.print("❌ {s}\n", .{error_item.message});
+    var db_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+    defer db_fields.deinit();
+
+    const host_ptr = try allocator.create(flare.Schema);
+    host_ptr.* = host_schema;
+    try db_fields.put("host", host_ptr);
+
+    const port_ptr = try allocator.create(flare.Schema);
+    port_ptr.* = port_schema;
+    try db_fields.put("port", port_ptr);
+
+    // Load config from files
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{
+            .{ .path = "config.toml", .format = .toml },
+        },
+    });
+    defer config.deinit();
+
+    // Validate loaded config
+    var root_fields = std.StringHashMap(*const flare.Schema).init(allocator);
+    defer root_fields.deinit();
+
+    const db_ptr = try allocator.create(flare.Schema);
+    db_ptr.* = flare.Schema{ .schema_type = .object, .fields = db_fields };
+    try root_fields.put("database", db_ptr);
+
+    const root_schema = flare.Schema{ .schema_type = .object, .fields = root_fields };
+    config.setSchema(&root_schema);
+
+    var validation = try config.validateSchema();
+    defer validation.deinit(allocator);
+
+    if (validation.hasErrors()) {
+        for (validation.errors.items) |error_item| {
+            std.debug.print("Validation error: {s}\n", .{error_item.message});
+        }
     }
 }
 ```
@@ -223,7 +247,6 @@ pub fn main() !void {
         .files = &[_]flare.FileSource{
             .{ .path = "config.toml", .format = .toml },
         },
-        .env = .{ .prefix = "APP", .separator = "__" },
     });
     defer config.deinit();
 
@@ -257,7 +280,7 @@ pub fn main() !void {
 - Optional callbacks on config changes
 - Preserves default values during reload
 - Zero-allocation file watching
-- Thread-safe reload operations
+- Arena memory properly reset between reloads
 
 ## Flash CLI Integration
 
@@ -268,10 +291,9 @@ const std = @import("std");
 const flash = @import("flash");
 const flare = @import("flare");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// Zig 0.17+: Use Init signature to receive environ_map
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Create Flash command with automatic Flare integration
     const db_command = flare.flash.createConfigCommand(
@@ -281,7 +303,8 @@ pub fn main() !void {
             .config_files = &[_]flare.FileSource{
                 .{ .path = "config.toml", .required = false },
             },
-            .env_source = .{ .prefix = "MYAPP", .separator = "_" },
+            // Pass env_map for environment variable loading (MYAPP_DATABASE_HOST, etc.)
+            .env_source = .{ .prefix = "MYAPP", .separator = "_", .env_map = init.environ_map },
         },
         &[_]flare.flash.FlagLink{
             .{ .flag_name = "host", .config_key = "database.host", .short = "h" },
@@ -291,13 +314,14 @@ pub fn main() !void {
     );
 
     // Configuration is automatically loaded and validated!
+    _ = db_command;
 }
 
 fn connectHandler(ctx: flare.flash.CommandContext) !void {
     const host = try ctx.config.getString("database.host", "localhost");
     const port = try ctx.config.getInt("database.port", 5432);
 
-    std.debug.print("Connecting to {s}:{d}\\n", .{ host, port });
+    std.debug.print("Connecting to {s}:{d}\n", .{ host, port });
 }
 ```
 
@@ -314,10 +338,10 @@ for (servers.items, 0..) |server, i| {
     }
 }
 
-// Get list of strings from array
-const server_names = try config.getStringList("servers[*].name");
-for (server_names) |name| {
-    std.debug.print("• {s}\\n", .{name});
+// Get simple string arrays (e.g., tags = ["web", "api"])
+const tags = try config.getStringList("tags");
+for (tags) |tag| {
+    std.debug.print("• {s}\\n", .{tag});
 }
 
 // Access by index
@@ -359,7 +383,7 @@ const first_server = try config.getByIndex("servers", 0);
 
 ## Requirements
 
-- Zig 0.16.0 or later
+- Zig 0.17.0-dev or later (0.16.0 may work but is not tested)
 
 ## License
 

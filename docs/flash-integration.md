@@ -12,6 +12,17 @@ Flare + Flash integration provides:
 - **Type Safety** - Full type checking and conversion
 - **Zero Boilerplate** - Minimal setup required
 
+> **Note on Environment Variables**: To enable environment variable loading, you must provide an `env_map` in your `EnvSource`. Without it, env loading is skipped:
+> ```zig
+> var env_map = try std.process.getEnvMap(allocator);
+> defer env_map.deinit();
+>
+> const config_options = flare.flash.FlashConfigOptions{
+>     .config_files = &config_files,
+>     .env_source = .{ .prefix = "MYAPP", .separator = "_", .env_map = &env_map },
+> };
+> ```
+
 ## Basic Integration
 
 ### Step 1: Set Up Dependencies
@@ -53,13 +64,16 @@ pub fn main() !void {
         .about = "My awesome CLI with configuration",
     });
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Set up configuration options
     const config_options = flare.flash.FlashConfigOptions{
         .config_files = &[_]flare.FileSource{
             .{ .path = "config.toml", .required = false },
             .{ .path = "~/.myapp/config.toml", .required = false },
         },
-        .env_source = .{ .prefix = "MYAPP", .separator = "_" },
+        .env_source = .{ .prefix = "MYAPP", .separator = "_", .env_map = &env_map },
     };
 
     // Create a command with configuration
@@ -166,12 +180,15 @@ pub fn main() !void {
     // Create schema
     const app_schema = try createAppSchema(allocator);
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Configure with schema validation
     const config_options = flare.flash.FlashConfigOptions{
         .config_files = &[_]flare.FileSource{
             .{ .path = "config.toml", .required = false },
         },
-        .env_source = .{ .prefix = "MYAPP", .separator = "_" },
+        .env_source = .{ .prefix = "MYAPP", .separator = "_", .env_map = &env_map },
         .schema = &app_schema,
     };
 
@@ -216,13 +233,16 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     // Shared configuration options
     const config_options = flare.flash.FlashConfigOptions{
         .config_files = &[_]flare.FileSource{
             .{ .path = "config.toml", .required = false },
             .{ .path = "~/.myapp/config.toml", .required = false },
         },
-        .env_source = .{ .prefix = "MYAPP", .separator = "_" },
+        .env_source = .{ .prefix = "MYAPP", .separator = "_", .env_map = &env_map },
     };
 
     const cli = flash.CLI(.{
@@ -349,8 +369,12 @@ fn serverListHandler(ctx: flare.flash.CommandContext) !void {
 Handle multiple environments (development, staging, production):
 
 ```zig
-fn createEnvironmentAwareCLI() !void {
+fn createEnvironmentAwareCLI(allocator: std.mem.Allocator) !void {
     const env = std.process.getEnvVarOwned(allocator, "APP_ENV") catch "development";
+    defer allocator.free(env);
+
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
 
     const config_files = switch (std.mem.eql(u8, env, "production")) {
         true => &[_]flare.FileSource{
@@ -366,7 +390,7 @@ fn createEnvironmentAwareCLI() !void {
 
     const config_options = flare.flash.FlashConfigOptions{
         .config_files = config_files,
-        .env_source = .{ .prefix = "APP", .separator = "_" },
+        .env_source = .{ .prefix = "APP", .separator = "_", .env_map = &env_map },
     };
 
     // Use config_options in your commands...

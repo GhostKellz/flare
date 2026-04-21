@@ -1,4 +1,18 @@
-//! Basic TOML parser for Flare configuration
+//! DEPRECATED: Legacy TOML parser - will be removed in v0.3.0
+//!
+//! This module has been superseded by toml_lexer.zig + toml_parser.zig which
+//! provide full TOML 1.0 support including:
+//! - Nested tables and dotted keys
+//! - Arrays of tables ([[array]])
+//! - Inline tables ({ key = value })
+//! - Datetime, date, and time types
+//! - All escape sequences
+//! - Multiline strings
+//!
+//! The main load() function now uses the new parser automatically.
+//! This file is kept only for backward compatibility and will be removed.
+//!
+//! Basic TOML parser for Flare configuration (LEGACY)
 //! Supports basic TOML syntax: key=value, [sections], and nested objects
 
 const std = @import("std");

@@ -20,11 +20,14 @@ pub fn load(allocator: std.mem.Allocator, options: LoadOptions) FlareError!Confi
 
 **Example:**
 ```zig
+var env_map = try std.process.getEnvMap(allocator);
+defer env_map.deinit();
+
 var config = try flare.load(allocator, .{
     .files = &[_]flare.FileSource{
         .{ .path = "config.json" },
     },
-    .env = .{ .prefix = "APP", .separator = "__" },
+    .env = .{ .prefix = "APP", .separator = "__", .env_map = &env_map },
 });
 defer config.deinit();
 ```
@@ -342,9 +345,10 @@ pub fn getStringList(self: *Self, key: []const u8) FlareError![][]const u8
 
 **Example:**
 ```zig
-const server_names = try config.getStringList("servers[*].name");
-for (server_names) |name| {
-    std.debug.print("Server: {s}\n", .{name});
+// Get a simple string array like "tags = ['web', 'api', 'v2']"
+const tags = try config.getStringList("tags");
+for (tags) |tag| {
+    std.debug.print("Tag: {s}\n", .{tag});
 }
 ```
 
@@ -513,16 +517,27 @@ const required_field = flare.Schema.string(.{}).required();
 
 ##### `default()`
 
-Set a default value for the field.
+Set a default value for the field (metadata only).
+
+**Note:** Schema defaults are for documentation and introspection only. They are NOT automatically injected into config values at runtime. To apply runtime defaults, use `config.setDefault("key", value)` instead.
 
 ```zig
 pub fn default(self: Schema, value: Value) Schema
 ```
 
+**Use cases:**
+- Generating documentation with default values
+- Schema-based tooling that needs to know expected defaults
+- Validation that checks whether a value matches the expected default
+
 **Example:**
 ```zig
-const port_with_default = flare.Schema.int(.{})
+// Schema default (metadata only)
+const port_schema = flare.Schema.int(.{})
     .default(flare.Value{ .int_value = 8080 });
+
+// To actually apply defaults at runtime, use config.setDefault():
+try config.setDefault("server.port", flare.Value{ .int_value = 8080 });
 ```
 
 ##### `withDescription()`
@@ -775,11 +790,11 @@ const flash_ctx = FlashContext{
     .command = "connect",
 };
 
+// Note: env_source requires env_map for actual env var loading
 var config = try flare.flash.initWithFlash(allocator, flash_ctx, .{
     .config_files = &[_]flare.FileSource{
         .{ .path = "config.toml", .required = false },
     },
-    .env_source = .{ .prefix = "MYAPP" },
 });
 ```
 

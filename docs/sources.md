@@ -6,9 +6,10 @@ Flare supports loading configuration from multiple sources with a clear preceden
 
 Flare follows this precedence order (highest to lowest):
 
-1. **Environment Variables** (highest priority)
-2. **Configuration Files** (medium priority)
-3. **Default Values** (lowest priority)
+1. **CLI Arguments** (highest priority - if provided via `.cli` option)
+2. **Environment Variables** (medium-high priority)
+3. **Configuration Files** (medium priority - later files override earlier)
+4. **Default Values** (lowest priority)
 
 Values from higher-priority sources override those from lower-priority sources.
 
@@ -111,10 +112,15 @@ Environment variables provide a powerful way to override configuration at runtim
 ### Basic Usage
 
 ```zig
+// Get environment map (required in Zig 0.16+)
+var env_map = try std.process.getEnvMap(allocator);
+defer env_map.deinit();
+
 var config = try flare.load(allocator, .{
     .env = .{
         .prefix = "MYAPP",
-        .separator = "__"
+        .separator = "__",
+        .env_map = &env_map,  // Required for env loading
     },
 });
 ```
@@ -194,13 +200,16 @@ const required_key = try config.getString("required.key", null); // FlareError.M
 ### Multiple Files with Precedence
 
 ```zig
+var env_map = try std.process.getEnvMap(allocator);
+defer env_map.deinit();
+
 var config = try flare.load(allocator, .{
     .files = &[_]flare.FileSource{
         .{ .path = "config.base.json", .required = true },      // Base configuration
         .{ .path = "config.development.json", .required = false }, // Development overrides
         .{ .path = "config.local.json", .required = false },      // Local developer overrides
     },
-    .env = .{ .prefix = "MYAPP", .separator = "__" },             // Environment overrides
+    .env = .{ .prefix = "MYAPP", .separator = "__", .env_map = &env_map },
 });
 ```
 
@@ -229,8 +238,10 @@ project/
 ### Development Environment
 
 ```zig
-const env = std.process.getEnvVarOwned(allocator, "ENVIRONMENT") catch "development";
-defer allocator.free(env);
+var env_map = try std.process.getEnvMap(allocator);
+defer env_map.deinit();
+
+const env = env_map.get("ENVIRONMENT") orelse "development";
 
 const config_file = try std.fmt.allocPrint(allocator, "config/config.{s}.json", .{env});
 defer allocator.free(config_file);
@@ -241,7 +252,7 @@ var config = try flare.load(allocator, .{
         .{ .path = config_file, .required = false },
         .{ .path = "config.local.json", .required = false },
     },
-    .env = .{ .prefix = "MYAPP", .separator = "__" },
+    .env = .{ .prefix = "MYAPP", .separator = "__", .env_map = &env_map },
 });
 ```
 

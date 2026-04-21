@@ -136,7 +136,16 @@ pub const Schema = struct {
         return result;
     }
 
-    /// Set a default value for this field
+    /// Set a default value for this field (metadata only).
+    ///
+    /// NOTE: This is for documentation and introspection purposes only.
+    /// Schema defaults are NOT automatically injected into config values.
+    /// To apply runtime defaults, use `config.setDefault("key", value)` instead.
+    ///
+    /// Use cases for schema defaults:
+    /// - Generating documentation with default values
+    /// - Schema-based tooling that needs to know expected defaults
+    /// - Validation that checks whether a value matches the expected default
     pub fn default(self: Schema, value: flare.Value) Schema {
         var result = self;
         result.default_value = value;
@@ -150,11 +159,39 @@ pub const Schema = struct {
         return result;
     }
 
+    /// Clean up allocated schema resources
+    /// Call this on schemas created with Schema.object() or Schema.root()
+    /// to free the allocated field schema nodes
+    pub fn deinit(self: *Schema, allocator: std.mem.Allocator) void {
+        if (self.fields) |*fields| {
+            var iter = fields.iterator();
+            while (iter.next()) |entry| {
+                // Get mutable pointer and recursively deinit
+                const field_schema_ptr = @constCast(entry.value_ptr.*);
+                field_schema_ptr.deinit(allocator);
+                allocator.destroy(field_schema_ptr);
+            }
+            fields.deinit();
+            self.fields = null;
+        }
+
+        // Clean up array item schema if present
+        if (self.array_constraints) |*constraints| {
+            if (constraints.item_schema) |item_schema| {
+                const mutable_item = @constCast(item_schema);
+                mutable_item.deinit(allocator);
+                allocator.destroy(mutable_item);
+                constraints.item_schema = null;
+            }
+        }
+    }
+
     /// Validate a value against this schema
     pub fn validate(self: *const Self, value: ?flare.Value, path: []const u8) SchemaError!void {
+        _ = path; // Used for error context in callers
+
         // Check if required field is missing
         if (self.is_required and value == null) {
-            std.debug.print("Schema validation failed: missing required field '{s}'\n", .{path});
             return SchemaError.MissingRequiredField;
         }
 
@@ -169,73 +206,106 @@ pub const Schema = struct {
         switch (self.schema_type) {
             .string => {
                 if (val != .string_value) {
-                    std.debug.print("Schema validation failed: expected string at '{s}', got {}\n", .{ path, val });
                     return SchemaError.TypeMismatch;
                 }
-                try self.validateString(val.string_value, path);
+                try self.validateString(val.string_value);
             },
             .int => {
                 if (val != .int_value) {
-                    std.debug.print("Schema validation failed: expected int at '{s}', got {}\n", .{ path, val });
                     return SchemaError.TypeMismatch;
                 }
-                try self.validateInt(val.int_value, path);
+                try self.validateInt(val.int_value);
             },
             .bool => {
                 if (val != .bool_value) {
-                    std.debug.print("Schema validation failed: expected bool at '{s}', got {}\n", .{ path, val });
                     return SchemaError.TypeMismatch;
                 }
             },
             .float => {
                 if (val != .float_value) {
-                    std.debug.print("Schema validation failed: expected float at '{s}', got {}\n", .{ path, val });
                     return SchemaError.TypeMismatch;
                 }
-                try self.validateFloat(val.float_value, path);
+                try self.validateFloat(val.float_value);
             },
             .object => {
-                // Object validation handled by validator
-                return SchemaError.ValidationFailed;
+                // Object must be a map_value
+                if (val != .map_value) {
+                    return SchemaError.TypeMismatch;
+                }
+                // If we have field schemas, validate each field
+                if (self.fields) |fields| {
+                    var iter = fields.iterator();
+                    while (iter.next()) |entry| {
+                        const field_name = entry.key_ptr.*;
+                        const field_schema = entry.value_ptr.*;
+
+                        // Check if field exists in value
+                        if (val.map_value.get(field_name)) |field_value| {
+                            // Validate the field value against its schema
+                            try field_schema.validate(field_value, field_name);
+                        } else if (field_schema.is_required) {
+                            return SchemaError.MissingRequiredField;
+                        }
+                    }
+                }
             },
             .array => {
-                // Array validation not implemented yet
-                return SchemaError.ValidationFailed;
+                // Array must be an array_value
+                if (val != .array_value) {
+                    return SchemaError.TypeMismatch;
+                }
+                // Validate array constraints
+                if (self.array_constraints) |constraints| {
+                    const arr = val.array_value;
+                    if (constraints.min_items) |min| {
+                        if (arr.items.len < min) {
+                            return SchemaError.ValueOutOfRange;
+                        }
+                    }
+                    if (constraints.max_items) |max| {
+                        if (arr.items.len > max) {
+                            return SchemaError.ValueOutOfRange;
+                        }
+                    }
+                    // Validate each item if item_schema is provided
+                    if (constraints.item_schema) |item_schema| {
+                        for (arr.items, 0..) |item, i| {
+                            var item_path_buf: [256]u8 = undefined;
+                            const item_path = std.fmt.bufPrint(&item_path_buf, "[{d}]", .{i}) catch "";
+                            try item_schema.validate(item, item_path);
+                        }
+                    }
+                }
             },
         }
     }
 
     /// Validate string constraints
-    fn validateString(self: *const Self, value: []const u8, path: []const u8) SchemaError!void {
+    fn validateString(self: *const Self, value: []const u8) SchemaError!void {
         if (self.string_constraints) |constraints| {
             if (constraints.min_length) |min| {
                 if (value.len < min) {
-                    std.debug.print("Schema validation failed: string at '{s}' too short (min: {d}, actual: {d})\n", .{ path, min, value.len });
                     return SchemaError.ValueOutOfRange;
                 }
             }
             if (constraints.max_length) |max| {
                 if (value.len > max) {
-                    std.debug.print("Schema validation failed: string at '{s}' too long (max: {d}, actual: {d})\n", .{ path, max, value.len });
                     return SchemaError.ValueOutOfRange;
                 }
             }
-            // Pattern validation would go here
         }
     }
 
     /// Validate integer constraints
-    fn validateInt(self: *const Self, value: i64, path: []const u8) SchemaError!void {
+    fn validateInt(self: *const Self, value: i64) SchemaError!void {
         if (self.int_constraints) |constraints| {
             if (constraints.min) |min| {
                 if (value < min) {
-                    std.debug.print("Schema validation failed: int at '{s}' too small (min: {d}, actual: {d})\n", .{ path, min, value });
                     return SchemaError.ValueOutOfRange;
                 }
             }
             if (constraints.max) |max| {
                 if (value > max) {
-                    std.debug.print("Schema validation failed: int at '{s}' too large (max: {d}, actual: {d})\n", .{ path, max, value });
                     return SchemaError.ValueOutOfRange;
                 }
             }
@@ -243,17 +313,15 @@ pub const Schema = struct {
     }
 
     /// Validate float constraints
-    fn validateFloat(self: *const Self, value: f64, path: []const u8) SchemaError!void {
+    fn validateFloat(self: *const Self, value: f64) SchemaError!void {
         if (self.float_constraints) |constraints| {
             if (constraints.min) |min| {
                 if (value < min) {
-                    std.debug.print("Schema validation failed: float at '{s}' too small (min: {d}, actual: {d})\n", .{ path, min, value });
                     return SchemaError.ValueOutOfRange;
                 }
             }
             if (constraints.max) |max| {
                 if (value > max) {
-                    std.debug.print("Schema validation failed: float at '{s}' too large (max: {d}, actual: {d})\n", .{ path, max, value });
                     return SchemaError.ValueOutOfRange;
                 }
             }
@@ -266,11 +334,10 @@ pub const ValidationResult = struct {
     errors: std.ArrayList(ValidationError),
     warnings: std.ArrayList(ValidationWarning),
 
-    pub fn init(allocator: std.mem.Allocator) ValidationResult {
-        _ = allocator;
+    pub fn init(_: std.mem.Allocator) ValidationResult {
         return ValidationResult{
-            .errors = std.ArrayList(ValidationError){},
-            .warnings = std.ArrayList(ValidationWarning){},
+            .errors = .empty,
+            .warnings = .empty,
         };
     }
 
@@ -346,4 +413,86 @@ test "basic validation" {
     const required_schema = Schema.string(.{}).required();
     try std.testing.expectError(SchemaError.MissingRequiredField,
         required_schema.validate(null, "test"));
+}
+
+test "array validation" {
+    const testing = std.testing;
+
+    // Array with min/max items
+    const array_schema = Schema{
+        .schema_type = .array,
+        .array_constraints = .{
+            .min_items = 2,
+            .max_items = 5,
+        },
+    };
+
+    // Create a valid array (3 items)
+    var valid_array: std.ArrayList(flare.Value) = .empty;
+    try valid_array.append(testing.allocator, flare.Value{ .int_value = 1 });
+    try valid_array.append(testing.allocator, flare.Value{ .int_value = 2 });
+    try valid_array.append(testing.allocator, flare.Value{ .int_value = 3 });
+    defer valid_array.deinit(testing.allocator);
+
+    try array_schema.validate(flare.Value{ .array_value = valid_array }, "numbers");
+
+    // Too few items
+    var short_array: std.ArrayList(flare.Value) = .empty;
+    try short_array.append(testing.allocator, flare.Value{ .int_value = 1 });
+    defer short_array.deinit(testing.allocator);
+
+    try testing.expectError(SchemaError.ValueOutOfRange,
+        array_schema.validate(flare.Value{ .array_value = short_array }, "numbers"));
+
+    // Wrong type (not an array)
+    try testing.expectError(SchemaError.TypeMismatch,
+        array_schema.validate(flare.Value{ .int_value = 42 }, "numbers"));
+}
+
+test "object validation" {
+    const testing = std.testing;
+
+    // Create field schemas
+    const name_schema = Schema.string(.{ .min_length = 1 }).required();
+    const port_schema = Schema.int(.{ .min = 1, .max = 65535 });
+
+    // Build object schema with fields
+    var fields = std.StringHashMap(*const Schema).init(testing.allocator);
+    defer fields.deinit();
+
+    const name_ptr = try testing.allocator.create(Schema);
+    defer testing.allocator.destroy(name_ptr);
+    name_ptr.* = name_schema;
+
+    const port_ptr = try testing.allocator.create(Schema);
+    defer testing.allocator.destroy(port_ptr);
+    port_ptr.* = port_schema;
+
+    try fields.put("name", name_ptr);
+    try fields.put("port", port_ptr);
+
+    const object_schema = Schema{
+        .schema_type = .object,
+        .fields = fields,
+    };
+
+    // Create a valid object value
+    var valid_map = std.StringHashMap(flare.Value).init(testing.allocator);
+    defer valid_map.deinit();
+    try valid_map.put("name", flare.Value{ .string_value = "myapp" });
+    try valid_map.put("port", flare.Value{ .int_value = 8080 });
+
+    try object_schema.validate(flare.Value{ .map_value = valid_map }, "config");
+
+    // Missing required field
+    var missing_name = std.StringHashMap(flare.Value).init(testing.allocator);
+    defer missing_name.deinit();
+    try missing_name.put("port", flare.Value{ .int_value = 8080 });
+
+    try testing.expectError(SchemaError.MissingRequiredField,
+        object_schema.validate(flare.Value{ .map_value = missing_name }, "config"));
+
+    // Wrong type (not an object)
+    try testing.expectError(SchemaError.TypeMismatch,
+        object_schema.validate(flare.Value{ .string_value = "not an object" }, "config"));
 }

@@ -2,9 +2,9 @@
 /zig-out/
 *.o
 *.exe
-TODO.md 
+tasks/
 CLAUDE.md
-internal-docs/
+archive/
 .zig-cache/
 archive/
 zig-pkg/
