@@ -2,6 +2,24 @@
 
 All notable changes to Flare will be documented in this file.
 
+## [0.2.2] - 2026-06-14
+
+### Added
+- **Struct-to-TOML serialization** - `serialize(T, allocator, value)` converts a Zig struct to a `TomlTable`, and `toTomlString(T, allocator, value)` produces a TOML string directly. Inverse of `parseInto`/`deserialize`; null optional fields are omitted.
+- **`saveToFile()` / `saveToFileWithOptions()`** - serialize a `TomlTable` to TOML text and write it to disk.
+
+### Changed
+- Updated build system and source for Zig `0.17.0-dev.836` (`b.args` → `RunStep.addPassthruArgs()`; `std.builtin.Type.Struct` field reflection now uses parallel `field_names`/`field_types`/`field_attrs` arrays).
+- Bumped `minimum_zig_version` to `0.17.0-dev.836+e357134f0`.
+
+### Performance
+- Strict-mode schema validation (`TomlSchema.validate`) now builds a known-field set once for O(n) unknown-field detection instead of an O(n×m) linear scan.
+
+### New Files
+- `src/serialize.zig` - Comptime struct-to-TOML serialization.
+
+---
+
 ## [0.2.0] - 2026-04-21
 
 ### Added

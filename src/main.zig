@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Set programmatic defaults
     try config.setDefault("app.name", flare.Value{ .string_value = "My Flare App" });
-    try config.setDefault("app.version", flare.Value{ .string_value = "0.2.0" });
+    try config.setDefault("app.version", flare.Value{ .string_value = flare.VERSION });
 
     const app_name = try config.getString("app.name", "Unknown App");
     const app_version = try config.getString("app.version", "0.0.0");

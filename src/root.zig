@@ -2,6 +2,10 @@
 //! What viper is to Cobra in Go, Flare is to Flash in Zig
 
 const std = @import("std");
+const build_options = @import("build_options");
+
+/// Library version, sourced from build.zig.zon (single source of truth).
+pub const VERSION = build_options.version;
 
 // Export schema and validation modules
 pub const Schema = @import("schema.zig").Schema;
@@ -40,10 +44,18 @@ pub const deserialize = deserialize_mod.deserialize;
 pub const freeDeserialized = deserialize_mod.free;
 pub const DeserializeError = deserialize_mod.DeserializeError;
 
+// Export struct serialization (struct -> TOML)
+pub const serialize_mod = @import("serialize.zig");
+pub const serialize = serialize_mod.serialize;
+pub const toTomlString = serialize_mod.toTomlString;
+pub const SerializeError = serialize_mod.SerializeError;
+
 // Export TOML stringification
 pub const stringify_mod = @import("stringify.zig");
 pub const stringify = stringify_mod.stringify;
 pub const stringifyWithOptions = stringify_mod.stringifyWithOptions;
+pub const saveToFile = stringify_mod.saveToFile;
+pub const saveToFileWithOptions = stringify_mod.saveToFileWithOptions;
 pub const FormatOptions = stringify_mod.FormatOptions;
 pub const StringifyError = stringify_mod.StringifyError;
 
@@ -1207,6 +1219,7 @@ comptime {
     _ = @import("toml_lexer.zig");
     _ = @import("toml_parser.zig");
     _ = @import("deserialize.zig");
+    _ = @import("serialize.zig");
     _ = @import("stringify.zig");
     _ = @import("schema_gen.zig");
     _ = @import("flash_bridge.zig");

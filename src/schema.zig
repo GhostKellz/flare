@@ -108,14 +108,14 @@ pub const Schema = struct {
         var fields = std.StringHashMap(*const Schema).init(allocator);
 
         const type_info = @typeInfo(@TypeOf(field_definitions));
-        if (type_info != .Struct) {
+        if (type_info != .@"struct") {
             @compileError("object fields must be a struct");
         }
 
-        inline for (type_info.Struct.fields) |field| {
+        inline for (type_info.@"struct".field_names) |name| {
             const field_schema = try allocator.create(Schema);
-            field_schema.* = @field(field_definitions, field.name);
-            try fields.put(field.name, field_schema);
+            field_schema.* = @field(field_definitions, name);
+            try fields.put(name, field_schema);
         }
 
         return Schema{

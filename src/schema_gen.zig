@@ -98,19 +98,18 @@ pub const TomlSchema = struct {
 
         // Check for unknown fields if strict mode
         if (!self.allow_unknown) {
+            // Build a set of known field names once for O(1) lookups, so the
+            // unknown-field check is O(n) over the table rather than O(n*m).
+            var known = std.StringHashMap(void).init(allocator);
+            defer known.deinit();
+            for (self.fields) |field| {
+                known.put(field.name, {}) catch {};
+            }
+
             var it = table.map.iterator();
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
-                var found = false;
-
-                for (self.fields) |field| {
-                    if (std.mem.eql(u8, field.name, key)) {
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found) {
+                if (!known.contains(key)) {
                     const msg = std.fmt.allocPrint(
                         allocator,
                         "Unknown field: '{s}'",
@@ -313,8 +312,13 @@ pub fn schemaFrom(comptime T: type, allocator: std.mem.Allocator) !TomlSchema {
             var builder = SchemaBuilder.init(allocator);
             defer builder.deinit();
 
-            inline for (struct_info.fields) |field| {
-                const field_schema = createFieldSchema(field);
+            inline for (struct_info.field_names, struct_info.field_types, struct_info.field_attrs) |name, FieldType, attrs| {
+                const field_schema = FieldSchema{
+                    .name = name,
+                    .field_type = inferValueType(FieldType),
+                    .required = attrs.default_value_ptr == null,
+                    .description = null,
+                };
                 _ = try builder.addField(field_schema);
             }
 
@@ -323,19 +327,6 @@ pub fn schemaFrom(comptime T: type, allocator: std.mem.Allocator) !TomlSchema {
         },
         else => @compileError("schemaFrom only works with struct types"),
     }
-}
-
-fn createFieldSchema(comptime field: std.builtin.Type.StructField) FieldSchema {
-    return FieldSchema{
-        .name = field.name,
-        .field_type = inferValueType(field.type),
-        .required = !hasDefault(field),
-        .description = null,
-    };
-}
-
-fn hasDefault(comptime field: std.builtin.Type.StructField) bool {
-    return field.default_value_ptr != null;
 }
 
 fn inferValueType(comptime T: type) ValueType {
@@ -497,4 +488,39 @@ test "schema builder pattern" {
     defer result.deinit();
 
     try testing.expect(result.valid);
+}
+
+test "schema validation - strict mode rejects unknown fields" {
+    const testing = std.testing;
+
+    const source =
+        \\name = "test"
+        \\port = 8080
+        \\extra = "unexpected"
+    ;
+
+    const table = try toml_parser.parseToml(testing.allocator, source);
+    defer {
+        table.deinit();
+        testing.allocator.destroy(table);
+    }
+
+    const schema = TomlSchema{
+        .fields = &[_]FieldSchema{
+            .{ .name = "name", .field_type = .string, .required = true },
+            .{ .name = "port", .field_type = .integer, .required = true },
+        },
+        .allow_unknown = false,
+    };
+
+    var result = schema.validate(table, testing.allocator);
+    defer result.deinit();
+
+    try testing.expect(!result.valid);
+
+    var found_unknown = false;
+    for (result.errors.items) |err| {
+        if (std.mem.indexOf(u8, err, "extra") != null) found_unknown = true;
+    }
+    try testing.expect(found_unknown);
 }

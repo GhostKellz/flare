@@ -36,25 +36,24 @@ pub fn deserialize(comptime T: type, allocator: std.mem.Allocator, table: *const
         .@"struct" => |struct_info| {
             var result: T = undefined;
 
-            inline for (struct_info.fields) |field| {
-                const val = table.get(field.name);
+            inline for (struct_info.field_names, struct_info.field_types, struct_info.field_attrs) |name, FieldType, attrs| {
+                const val = table.get(name);
 
                 if (val == null) {
                     // Check if field has a default value
-                    if (field.default_value_ptr) |default_ptr| {
-                        const aligned_ptr: *align(1) const field.type = @ptrCast(default_ptr);
-                        @field(result, field.name) = aligned_ptr.*;
+                    if (attrs.defaultValue(FieldType)) |default_val| {
+                        @field(result, name) = default_val;
                     } else {
                         // Check if field type is optional - missing optionals become null
-                        const field_type_info = @typeInfo(field.type);
+                        const field_type_info = @typeInfo(FieldType);
                         if (field_type_info == .optional) {
-                            @field(result, field.name) = null;
+                            @field(result, name) = null;
                         } else {
                             return error.MissingField;
                         }
                     }
                 } else {
-                    @field(result, field.name) = try deserializeValue(field.type, allocator, val.?);
+                    @field(result, name) = try deserializeValue(FieldType, allocator, val.?);
                 }
             }
 
@@ -130,8 +129,8 @@ pub fn free(comptime T: type, allocator: std.mem.Allocator, data: T) void {
 
     switch (type_info) {
         .@"struct" => |struct_info| {
-            inline for (struct_info.fields) |field| {
-                freeValue(field.type, allocator, @field(data, field.name));
+            inline for (struct_info.field_names, struct_info.field_types) |name, FieldType| {
+                freeValue(FieldType, allocator, @field(data, name));
             }
         },
         else => {},

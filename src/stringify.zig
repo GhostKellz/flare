@@ -335,6 +335,60 @@ pub fn stringifyWithOptions(allocator: std.mem.Allocator, table: *const TomlTabl
     return try allocator.dupe(u8, result);
 }
 
+/// Serialize a TomlTable to TOML text and write it to `path`.
+/// `allocator` is used only for the intermediate buffer, which is freed before returning.
+pub fn saveToFile(allocator: std.mem.Allocator, table: *const TomlTable, path: []const u8) !void {
+    return saveToFileWithOptions(allocator, table, path, .{});
+}
+
+/// Like `saveToFile`, but with custom formatting options.
+pub fn saveToFileWithOptions(
+    allocator: std.mem.Allocator,
+    table: *const TomlTable,
+    path: []const u8,
+    options: FormatOptions,
+) !void {
+    const text = try stringifyWithOptions(allocator, table, options);
+    defer allocator.free(text);
+
+    try std.Io.Dir.cwd().writeFile(std.Options.debug_io, .{
+        .sub_path = path,
+        .data = text,
+    });
+}
+
+test "saveToFile round-trips through the filesystem" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+
+    const source =
+        \\name = "flare"
+        \\port = 8080
+    ;
+
+    const table = try toml_parser.parseToml(testing.allocator, source);
+    defer {
+        table.deinit();
+        testing.allocator.destroy(table);
+    }
+
+    const path = "flare-save-test.toml";
+    try saveToFile(testing.allocator, table, path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .limited(1024 * 1024));
+    defer testing.allocator.free(contents);
+
+    const reparsed = try toml_parser.parseToml(testing.allocator, contents);
+    defer {
+        reparsed.deinit();
+        testing.allocator.destroy(reparsed);
+    }
+
+    try testing.expectEqualStrings("flare", reparsed.getString("name").?);
+    try testing.expectEqual(@as(i64, 8080), reparsed.getInt("port").?);
+}
+
 test "stringify simple values" {
     const testing = std.testing;
 
