@@ -1,10 +1,8 @@
 const std = @import("std");
 const flare = @import("flare");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     std.debug.print("🔥 Flare Schema & TOML Demo\n\n", .{});
 
@@ -71,7 +69,8 @@ pub fn main() !void {
         },
     });
 
-    if (toml_load_result) |config| {
+    if (toml_load_result) |loaded| {
+        var config = loaded;
         defer config.deinit();
         std.debug.print("✅ TOML loaded successfully!\n", .{});
 
@@ -93,7 +92,7 @@ pub fn main() !void {
         // Validate against schema
         std.debug.print("🔍 Validating against schema...\n", .{});
         var validation_result = try toml_config.validateSchema();
-        defer validation_result.deinit();
+        defer validation_result.deinit(allocator);
 
         if (validation_result.hasErrors()) {
             std.debug.print("❌ Validation failed:\n", .{});
@@ -116,7 +115,7 @@ pub fn main() !void {
     try invalid_config.setValue("debug", flare.Value{ .bool_value = true });
 
     var invalid_result = try invalid_config.validateSchema();
-    defer invalid_result.deinit();
+    defer invalid_result.deinit(allocator);
 
     if (invalid_result.hasErrors()) {
         std.debug.print("✅ Correctly caught validation errors:\n", .{});

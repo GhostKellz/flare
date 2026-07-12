@@ -148,10 +148,8 @@ fn showConfig(ctx: flare.flash.CommandContext) !void {
     std.debug.print("  log_level = \"{s}\"\n", .{log_level});
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     std.debug.print("\n🔥 Flare + Flash Integration Demo\n", .{});
     std.debug.print("═════════════════════════════════════\n", .{});
@@ -167,6 +165,12 @@ pub fn main() !void {
         },
         .env_source = .{ .prefix = "APP", .separator = "__" },
         .schema = &app_schema,
+    };
+
+    // Map Flash flag names to dotted config keys so CLI flags override files/env.
+    const flag_links = [_]flare.flash.FlagLink{
+        .{ .flag_name = "database-host", .config_key = "database.host" },
+        .{ .flag_name = "debug", .config_key = "debug" },
     };
 
     // Simulate different commands with different CLI arguments
@@ -190,6 +194,7 @@ pub fn main() !void {
             allocator,
             flash_ctx,
             config_options,
+            &flag_links,
             connectDatabase,
         );
     }
@@ -197,9 +202,6 @@ pub fn main() !void {
     // Test 2: Server start with environment variables
     {
         std.debug.print("\n2️⃣  Command: myapp server start --debug\n", .{});
-
-        // Set environment variable (simulated)
-        try std.process.setEnvironVar("APP__SERVER__PORT", "3000");
 
         var flags = std.StringHashMap([]const u8).init(allocator);
         defer flags.deinit();
@@ -215,6 +217,7 @@ pub fn main() !void {
             allocator,
             flash_ctx,
             config_options,
+            &flag_links,
             startServer,
         );
     }
@@ -236,6 +239,7 @@ pub fn main() !void {
             allocator,
             flash_ctx,
             config_options,
+            &flag_links,
             showConfig,
         );
     }
@@ -248,7 +252,7 @@ pub fn main() !void {
     defer config.deinit();
 
     // Create an array of servers
-    var servers: std.ArrayList(flare.Value) = .{};
+    var servers: std.ArrayList(flare.Value) = .empty;
 
     var server1 = std.StringHashMap(flare.Value).init(config.getArenaAllocator());
     try server1.put("name", flare.Value{ .string_value = "api-1" });
@@ -289,9 +293,4 @@ pub fn main() !void {
     std.debug.print("  ✅ Arrays and maps\n", .{});
     std.debug.print("  ✅ Environment variable parsing\n", .{});
     std.debug.print("\n🚀 Ready to go beyond MVP!\n\n", .{});
-}
-
-test "flash integration example" {
-    // This test ensures the example compiles
-    try main();
 }

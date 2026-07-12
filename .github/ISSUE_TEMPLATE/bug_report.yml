@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a defect in Flare
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill out the sections
+        below so we can reproduce and fix it quickly.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps (or a minimal config + code snippet) that trigger the bug.
+      placeholder: |
+        1. Load this config...
+        2. Call config.getInt(...)
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exact error message or panic if there is one.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Flare is affected?
+      options:
+        - Loading / precedence
+        - TOML parser
+        - JSON parser
+        - Schema validation
+        - Origin tracking / strict mode
+        - Hot reload
+        - Flash integration
+        - CLI (validate/lint)
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Flare version / commit
+      placeholder: "e.g. 0.2.3 or a commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: zig-version
+    attributes:
+      label: Zig version
+      placeholder: "output of `zig version`"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. Linux x86_64, macOS arm64"
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Additional diagnostics
+      description: Logs, `flare validate` output, or anything else that helps.
+      render: shell
+    validations:
+      required: false

@@ -4,12 +4,10 @@
 
 <img src="assets/icons/flare.png" alt="Flare Logo" width="200" height="200">
 
-[![Built with Zig](https://img.shields.io/badge/Built%20with-Zig-yellow.svg?style=for-the-badge&logo=zig)](https://ziglang.org/)
-[![Zig Version](https://img.shields.io/badge/Zig-0.17.0--dev-orange.svg?style=for-the-badge)](https://ziglang.org/download/)
-[![Flash CLI Integration](https://img.shields.io/badge/Flash%20CLI-Integration-gold.svg?style=for-the-badge)](https://github.com/ghostkellz/flash)
-
-[![Status](https://img.shields.io/badge/Status-Stable-brightgreen.svg?style=for-the-badge)](https://github.com/ghostkellz/flare)
-[![Version](https://img.shields.io/badge/Version-0.2.0-green.svg?style=for-the-badge)](https://github.com/ghostkellz/flare/releases)
+[![Zig](https://img.shields.io/badge/Zig-0.17.0--dev-F7A41D.svg?style=for-the-badge&logo=zig&logoColor=white)](https://ziglang.org/)
+[![TOML](https://img.shields.io/badge/TOML-1.0-9C4121.svg?style=for-the-badge&logo=toml&logoColor=white)](https://toml.io/)
+[![JSON](https://img.shields.io/badge/JSON-supported-000000.svg?style=for-the-badge&logo=json&logoColor=white)](https://www.json.org/)
+[![Flash CLI](https://img.shields.io/badge/Flash-integration-FFD43B.svg?style=for-the-badge&logo=zig&logoColor=black)](https://github.com/ghostkellz/flash)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
 **What Viper is to Cobra in Go, Flare is to Flash in Zig**
@@ -374,21 +372,34 @@ const first_server = try config.getByIndex("servers", 0);
 
 ## Documentation
 
-- [Getting Started Guide](docs/getting-started.md) - Basic setup, CLI integration, and array handling
-- [Flash Integration Guide](docs/flash-integration.md) - Complete Flash CLI framework integration
-- [Schema System](docs/schema.md) - Declarative configuration validation with array schemas
-- [Configuration Sources](docs/sources.md) - JSON, TOML, environment variables, CLI args, and precedence
-- [API Reference](docs/api-reference.md) - Complete API documentation with new collection methods
-- [Examples](docs/examples.md) - Real-world usage examples with Flash integration and advanced features
+Full documentation lives in [`docs/`](docs/README.md) — start at the index.
+
+- [Documentation Index](docs/README.md) - navigation hub with architecture diagrams
+- [Quickstart](docs/getting-started/quickstart.md) - basic setup, CLI integration, and array handling
+- [Configuration Sources](docs/getting-started/configuration-sources.md) - JSON, TOML, env vars, CLI args, and precedence
+- [Schema Validation](docs/guides/schema-validation.md) - declarative validation with array schemas
+- [Flash Integration](docs/guides/flash-integration.md) - complete Flash CLI framework integration
+- [Origin Tracking & Precedence](docs/guides/origin-and-precedence.md) - trace values to their source; strict-mode conflicts
+- [Hot Reload](docs/guides/hot-reload.md) - reload on change with last-known-good rollback
+- [CLI: validate & lint](docs/guides/cli.md) - the `flare validate` config linter
+- [API Reference](docs/reference/api.md) - complete API documentation
+- [Architecture](docs/internals/architecture.md) - internals and data flow
+- [Examples](docs/guides/examples.md) - real-world usage examples
 
 ## Requirements
 
 - Zig 0.17.0-dev or later (0.16.0 may work but is not tested)
 
-## License
-
-MIT License - see LICENSE file for details.
-
 ## Contributing
 
-Contributions are welcome! Please see CONTRIBUTING.md for guidelines.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+workflow and the `zig build verify` release gate.
+
+## Security
+
+Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not
+open public issues for suspected vulnerabilities.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.

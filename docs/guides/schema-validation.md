@@ -142,9 +142,10 @@ if (validation_result.hasErrors()) {
 
 ```zig
 const string_schema = flare.Schema.string(.{
-    .min_length = 3,        // Minimum length
-    .max_length = 50,       // Maximum length
-    .pattern = "^[a-zA-Z]", // Regex pattern (planned)
+    .min_length = 3,          // Minimum length
+    .max_length = 50,         // Maximum length
+    .pattern = "user-*",      // Glob pattern (*/? wildcards), enforced
+    .choices = &.{ "a", "b" }, // Enum-style allowed values
 });
 ```
 
@@ -502,11 +503,10 @@ fn createEnvAwareSchema(allocator: std.mem.Allocator, environment: []const u8) !
 - **Custom validators** - User-defined validation functions
 - **Schema inheritance** - Extend existing schemas
 - **JSON Schema export** - Generate JSON Schema documents
-- **Pattern validation** - Full regex pattern matching for strings
 - **Cross-field validation** - Validate relationships between fields
 
 ## See Also
 
-- [Getting Started](getting-started.md) - Basic configuration usage
-- [Configuration Sources](sources.md) - Different ways to load configuration
-- [API Reference](api-reference.md) - Complete API documentation
+- [Quickstart](../getting-started/quickstart.md) - Basic configuration usage
+- [Configuration Sources](../getting-started/configuration-sources.md) - Different ways to load configuration
+- [API Reference](../reference/api.md) - Complete API documentation

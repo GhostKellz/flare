@@ -2,6 +2,25 @@
 
 All notable changes to Flare will be documented in this file.
 
+## [0.2.3] - 2026-07-11
+
+### Added
+- **Strict-mode conflict diagnostics** - `LoadOptions.strict` / `setStrict()` records cross-source type conflicts (e.g. a key that is an int in a file but a string from the environment). Inspect via `hasConflicts()` / `getConflicts()`.
+- **Schema string constraints** - `pattern` (glob, `*`/`?`) is now enforced instead of silently ignored, and a new `choices` constraint validates enum-style string values. Backed by a `globMatch` helper.
+- **Richer validation errors** - `ValidationError` now carries the offending `actual` value and its source `origin`, so messages read like `Value out of range at 'db.port' (got 70000, from command-line flag --port)`.
+- **`flare validate` / `flare lint <file>...` CLI** - parses each config file and reports per-file status with TOML line/column diagnostics. Scriptable exit codes: `0` all valid, `1` any file invalid, `2` usage error. The no-argument demo is preserved.
+- **Round-trip tests** - TOML `parse→stringify→parse` (scalars, nested tables, arrays) and `TOML→JSON` re-validated through `std.json`.
+
+### Changed
+- **Hot reload preserves last-known-good config.** A failed reload (invalid syntax, deleted required file) no longer wipes the running config: new state is built in a staging arena and swapped in only on success. `lastReloadError()` exposes the failure.
+- **Reload debounce** - `setReloadDebounce()` coalesces rapid file changes; `checkAndReload()` commits watcher mtimes and fires callbacks only after a successful reload.
+
+### Docs
+- `docs/sources.md` documents intentional non-goals: YAML is out of scope, JSON comments/trailing commas are rejected, and duplicate keys are errors rather than last-wins.
+
+### Removed
+- Dead `src/toml.zig` (legacy; the real engine is `toml_lexer` + `toml_parser` + `toml_value`) and stray root build artifacts (`test_arraylist*`, `test_env`).
+
 ## [0.2.2] - 2026-06-14
 
 ### Added

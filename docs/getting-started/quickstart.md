@@ -472,7 +472,8 @@ var config = try flare.load(allocator, .{
 
 ## Next Steps
 
-- [Learn about Flash CLI integration](flash-integration.md)
-- [Explore schema validation in depth](schema.md)
-- [Check out the full API reference](api-reference.md)
-- [Browse advanced examples](examples.md)
+- [Configuration sources & precedence](configuration-sources.md)
+- [Flash CLI integration](../guides/flash-integration.md)
+- [Schema validation in depth](../guides/schema-validation.md)
+- [Full API reference](../reference/api.md)
+- [Advanced examples](../guides/examples.md)

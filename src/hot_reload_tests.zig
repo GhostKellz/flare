@@ -244,3 +244,123 @@ test "hot reload preserves defaults" {
     try std.testing.expect(std.mem.eql(u8, dynamic2, "value2"));
     try std.testing.expect(std.mem.eql(u8, default2, "default_value"));
 }
+
+test "reload keeps last-known-good on invalid config" {
+    const allocator = std.testing.allocator;
+    const path = "test_hot_reload_invalid.json";
+
+    try createTestFile(path,
+        \\{ "value": 1 }
+    );
+    defer deleteTestFile(path);
+
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{.{ .path = path, .format = .json }},
+    });
+    defer config.deinit();
+
+    try std.testing.expect((try config.getInt("value", null)) == 1);
+    try std.testing.expect(config.lastReloadError() == null);
+
+    // Corrupt the required file: reload must reject and keep the old state.
+    try createTestFile(path, "{ this is not valid json ");
+    try std.testing.expectError(flare.FlareError.ParseError, config.reload());
+
+    // Previous good value is still served, and the failure is recorded.
+    try std.testing.expect((try config.getInt("value", null)) == 1);
+    try std.testing.expect(config.lastReloadError() != null);
+}
+
+test "reload keeps last-known-good when required file deleted, then recovers" {
+    const allocator = std.testing.allocator;
+    const path = "test_hot_reload_deleted.json";
+
+    try createTestFile(path,
+        \\{ "k": "v1" }
+    );
+    defer deleteTestFile(path);
+
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{.{ .path = path, .format = .json }},
+    });
+    defer config.deinit();
+
+    // Deletion of a required source is a failed reload; old value is preserved.
+    deleteTestFile(path);
+    try std.testing.expectError(flare.FlareError.Io, config.reload());
+    try std.testing.expect(std.mem.eql(u8, try config.getString("k", null), "v1"));
+    try std.testing.expect(config.lastReloadError() != null);
+
+    // Recreating the file lets the next reload succeed and clears the error.
+    try createTestFile(path,
+        \\{ "k": "v2" }
+    );
+    try config.reload();
+    try std.testing.expect(config.lastReloadError() == null);
+    try std.testing.expect(std.mem.eql(u8, try config.getString("k", null), "v2"));
+}
+
+test "checkAndReload does not fire callback on failed reload" {
+    const allocator = std.testing.allocator;
+    const path = "test_hot_reload_cb_fail.json";
+
+    try createTestFile(path,
+        \\{ "n": 1 }
+    );
+    defer deleteTestFile(path);
+
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{.{ .path = path, .format = .json }},
+    });
+    defer config.deinit();
+
+    const State = struct {
+        var called: bool = false;
+    };
+    State.called = false;
+    const cb = struct {
+        fn f(_: *flare.Config) void {
+            State.called = true;
+        }
+    }.f;
+
+    try config.enableHotReload(cb);
+
+    // Make the file newer, but invalid.
+    std.Io.sleep(io, .fromSeconds(1), .awake) catch {};
+    try createTestFile(path, "{ invalid ");
+
+    // The change is detected, reload fails, error propagates, callback stays
+    // silent, and the last-known-good value remains.
+    try std.testing.expectError(flare.FlareError.ParseError, config.checkAndReload());
+    try std.testing.expect(State.called == false);
+    try std.testing.expect((try config.getInt("n", null)) == 1);
+}
+
+test "checkAndReload debounces rapid changes" {
+    const allocator = std.testing.allocator;
+    const path = "test_hot_reload_debounce.json";
+
+    try createTestFile(path,
+        \\{ "v": 1 }
+    );
+    defer deleteTestFile(path);
+
+    var config = try flare.load(allocator, .{
+        .files = &[_]flare.FileSource{.{ .path = path, .format = .json }},
+    });
+    defer config.deinit();
+
+    try config.enableHotReload(null);
+    // A wide window so the just-written change is still "in flight".
+    config.setReloadDebounce(60 * std.time.ns_per_s);
+
+    std.Io.sleep(io, .fromSeconds(1), .awake) catch {};
+    try createTestFile(path,
+        \\{ "v": 2 }
+    );
+
+    // Within the debounce window the change is deferred, not applied.
+    try std.testing.expect((try config.checkAndReload()) == false);
+    try std.testing.expect((try config.getInt("v", null)) == 1);
+}

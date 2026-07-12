@@ -9,3 +9,4 @@ archive/
 .zig-cache/
 archive/
 zig-pkg/
+.scratch/

@@ -99,11 +99,23 @@ timeout = 30.5
 }
 ```
 
-### Future File Format Support
+### Format Support & Intentional Non-Goals
 
-Planned support for additional formats:
+Flare supports **JSON** and **TOML**. The following are deliberate non-goals,
+documented here so consumers are not left guessing:
 
-- **YAML** - Coming in v0.3.0
+- **YAML** is out of scope. Its significant-whitespace grammar and the
+  ambiguity of the spec (e.g. the "Norway problem" where `no` parses as a
+  boolean) are a poor fit for a small, predictable config core. Convert YAML to
+  JSON or TOML ahead of load instead.
+- **JSON comments are rejected.** Flare loads JSON through `std.json`, which
+  follows the JSON standard: comments (`//`, `/* */`) and trailing commas are
+  parse errors, not silently stripped. If you need comments, use TOML, which
+  supports them natively.
+- **Duplicate keys are errors, not last-wins.** Both parsers reject a document
+  that defines the same key twice (`std.json` defaults to `.error`; the TOML
+  parser rejects redefinition), so a typo fails loudly rather than being
+  silently overridden.
 
 ## Environment Variable Sources
 

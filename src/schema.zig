@@ -10,6 +10,8 @@ pub const SchemaError = error{
     TypeMismatch,
     ValueOutOfRange,
     InvalidFormat,
+    /// String value was not one of the allowed `choices`.
+    InvalidChoice,
     ValidationFailed,
 };
 
@@ -27,7 +29,15 @@ pub const SchemaType = enum {
 pub const StringConstraints = struct {
     min_length: ?usize = null,
     max_length: ?usize = null,
+    /// Glob-style pattern the value must match in full. Supports `*` (any run,
+    /// including empty) and `?` (exactly one character); all other characters
+    /// match literally. This is intentionally NOT a full regex engine — Zig's
+    /// std has no regex, and a glob covers the common "must look like X" cases
+    /// honestly. A value that does not match yields `SchemaError.InvalidFormat`.
     pattern: ?[]const u8 = null,
+    /// Closed set of allowed values (enum/choice). A value outside the set
+    /// yields `SchemaError.InvalidChoice`.
+    choices: ?[]const []const u8 = null,
 };
 
 pub const IntConstraints = struct {
@@ -293,6 +303,23 @@ pub const Schema = struct {
                     return SchemaError.ValueOutOfRange;
                 }
             }
+            if (constraints.choices) |choices| {
+                var matched = false;
+                for (choices) |choice| {
+                    if (std.mem.eql(u8, value, choice)) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    return SchemaError.InvalidChoice;
+                }
+            }
+            if (constraints.pattern) |pattern| {
+                if (!globMatch(pattern, value)) {
+                    return SchemaError.InvalidFormat;
+                }
+            }
         }
     }
 
@@ -329,6 +356,40 @@ pub const Schema = struct {
     }
 };
 
+/// Match `text` against a glob `pattern` supporting `*` (any run, including
+/// empty) and `?` (exactly one character). Linear-time with single-star
+/// backtracking; the whole text must be consumed. Used for
+/// `StringConstraints.pattern`.
+fn globMatch(pattern: []const u8, text: []const u8) bool {
+    var p: usize = 0;
+    var t: usize = 0;
+    var star: ?usize = null;
+    var star_t: usize = 0;
+
+    while (t < text.len) {
+        if (p < pattern.len and (pattern[p] == '?' or pattern[p] == text[t])) {
+            p += 1;
+            t += 1;
+        } else if (p < pattern.len and pattern[p] == '*') {
+            // Record the star position and the text index it started matching
+            // from, so we can backtrack and let it swallow one more character.
+            star = p;
+            star_t = t;
+            p += 1;
+        } else if (star) |sp| {
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+
+    // Any trailing stars in the pattern match the empty remainder.
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
+}
+
 /// Validation result containing errors and warnings
 pub const ValidationResult = struct {
     errors: std.ArrayList(ValidationError),
@@ -345,6 +406,7 @@ pub const ValidationResult = struct {
         for (self.errors.items) |err| {
             allocator.free(err.path);
             allocator.free(err.message);
+            if (err.actual) |actual| allocator.free(actual);
         }
         self.errors.deinit(allocator);
 
@@ -364,6 +426,12 @@ pub const ValidationError = struct {
     path: []const u8,
     message: []const u8,
     error_type: SchemaError,
+    /// Formatted rendering of the value that failed validation (owned by the
+    /// ValidationResult). Null when the failure is a missing value.
+    actual: ?[]const u8 = null,
+    /// Which source layer the failing value came from (file/env/cli/...),
+    /// resolved via the config's origin sidecar. Null when unknown or absent.
+    origin: ?flare.ValueOrigin = null,
 };
 
 pub const ValidationWarning = struct {
@@ -398,21 +466,17 @@ test "basic validation" {
     try string_schema.validate(flare.Value{ .string_value = "hello" }, "test");
 
     // Too short
-    try std.testing.expectError(SchemaError.ValueOutOfRange,
-        string_schema.validate(flare.Value{ .string_value = "hi" }, "test"));
+    try std.testing.expectError(SchemaError.ValueOutOfRange, string_schema.validate(flare.Value{ .string_value = "hi" }, "test"));
 
     // Too long
-    try std.testing.expectError(SchemaError.ValueOutOfRange,
-        string_schema.validate(flare.Value{ .string_value = "this_is_too_long" }, "test"));
+    try std.testing.expectError(SchemaError.ValueOutOfRange, string_schema.validate(flare.Value{ .string_value = "this_is_too_long" }, "test"));
 
     // Wrong type
-    try std.testing.expectError(SchemaError.TypeMismatch,
-        string_schema.validate(flare.Value{ .int_value = 42 }, "test"));
+    try std.testing.expectError(SchemaError.TypeMismatch, string_schema.validate(flare.Value{ .int_value = 42 }, "test"));
 
     // Test required validation
     const required_schema = Schema.string(.{}).required();
-    try std.testing.expectError(SchemaError.MissingRequiredField,
-        required_schema.validate(null, "test"));
+    try std.testing.expectError(SchemaError.MissingRequiredField, required_schema.validate(null, "test"));
 }
 
 test "array validation" {
@@ -441,12 +505,10 @@ test "array validation" {
     try short_array.append(testing.allocator, flare.Value{ .int_value = 1 });
     defer short_array.deinit(testing.allocator);
 
-    try testing.expectError(SchemaError.ValueOutOfRange,
-        array_schema.validate(flare.Value{ .array_value = short_array }, "numbers"));
+    try testing.expectError(SchemaError.ValueOutOfRange, array_schema.validate(flare.Value{ .array_value = short_array }, "numbers"));
 
     // Wrong type (not an array)
-    try testing.expectError(SchemaError.TypeMismatch,
-        array_schema.validate(flare.Value{ .int_value = 42 }, "numbers"));
+    try testing.expectError(SchemaError.TypeMismatch, array_schema.validate(flare.Value{ .int_value = 42 }, "numbers"));
 }
 
 test "object validation" {
@@ -489,10 +551,88 @@ test "object validation" {
     defer missing_name.deinit();
     try missing_name.put("port", flare.Value{ .int_value = 8080 });
 
-    try testing.expectError(SchemaError.MissingRequiredField,
-        object_schema.validate(flare.Value{ .map_value = missing_name }, "config"));
+    try testing.expectError(SchemaError.MissingRequiredField, object_schema.validate(flare.Value{ .map_value = missing_name }, "config"));
 
     // Wrong type (not an object)
-    try testing.expectError(SchemaError.TypeMismatch,
-        object_schema.validate(flare.Value{ .string_value = "not an object" }, "config"));
+    try testing.expectError(SchemaError.TypeMismatch, object_schema.validate(flare.Value{ .string_value = "not an object" }, "config"));
+}
+
+test "globMatch semantics" {
+    const testing = std.testing;
+
+    // Literal
+    try testing.expect(globMatch("abc", "abc"));
+    try testing.expect(!globMatch("abc", "abd"));
+
+    // ? matches exactly one char
+    try testing.expect(globMatch("a?c", "abc"));
+    try testing.expect(!globMatch("a?c", "ac"));
+
+    // * matches any run including empty
+    try testing.expect(globMatch("*", ""));
+    try testing.expect(globMatch("*", "anything"));
+    try testing.expect(globMatch("a*", "a"));
+    try testing.expect(globMatch("a*c", "abbbbc"));
+    try testing.expect(!globMatch("a*c", "abbbbd"));
+
+    // Anchored full match (not a substring search)
+    try testing.expect(!globMatch("abc", "xabcx"));
+    try testing.expect(globMatch("*.log", "server.log"));
+    try testing.expect(!globMatch("*.log", "server.txt"));
+
+    // Multiple stars
+    try testing.expect(globMatch("*mid*", "prefix-mid-suffix"));
+    try testing.expect(!globMatch("*mid*", "prefix-suffix"));
+}
+
+test "string pattern constraint" {
+    const testing = std.testing;
+    // Semver-ish: digits.digits.digits — approximated with glob wildcards.
+    const version_schema = Schema.string(.{ .pattern = "v*.*.*" });
+    try version_schema.validate(flare.Value{ .string_value = "v1.2.3" }, "version");
+    try testing.expectError(SchemaError.InvalidFormat, version_schema.validate(flare.Value{ .string_value = "1.2.3" }, "version"));
+
+    // Suffix constraint
+    const log_schema = Schema.string(.{ .pattern = "*.log" });
+    try log_schema.validate(flare.Value{ .string_value = "app.log" }, "file");
+    try testing.expectError(SchemaError.InvalidFormat, log_schema.validate(flare.Value{ .string_value = "app.txt" }, "file"));
+}
+
+test "string choices constraint" {
+    const testing = std.testing;
+    const level_schema = Schema.string(.{ .choices = &.{ "debug", "info", "warn", "error" } });
+
+    try level_schema.validate(flare.Value{ .string_value = "info" }, "log.level");
+    try level_schema.validate(flare.Value{ .string_value = "error" }, "log.level");
+    try testing.expectError(SchemaError.InvalidChoice, level_schema.validate(flare.Value{ .string_value = "trace" }, "log.level"));
+}
+
+test "array item_schema enforcement" {
+    const testing = std.testing;
+
+    // Each item must be an int in [1, 100].
+    const item = Schema.int(.{ .min = 1, .max = 100 });
+    const numbers_schema = Schema{
+        .schema_type = .array,
+        .array_constraints = .{ .item_schema = &item },
+    };
+
+    var good: std.ArrayList(flare.Value) = .empty;
+    defer good.deinit(testing.allocator);
+    try good.append(testing.allocator, flare.Value{ .int_value = 5 });
+    try good.append(testing.allocator, flare.Value{ .int_value = 50 });
+    try numbers_schema.validate(flare.Value{ .array_value = good }, "numbers");
+
+    // One element out of range fails the whole array.
+    var bad: std.ArrayList(flare.Value) = .empty;
+    defer bad.deinit(testing.allocator);
+    try bad.append(testing.allocator, flare.Value{ .int_value = 5 });
+    try bad.append(testing.allocator, flare.Value{ .int_value = 999 });
+    try testing.expectError(SchemaError.ValueOutOfRange, numbers_schema.validate(flare.Value{ .array_value = bad }, "numbers"));
+
+    // Wrong element type fails too.
+    var wrong: std.ArrayList(flare.Value) = .empty;
+    defer wrong.deinit(testing.allocator);
+    try wrong.append(testing.allocator, flare.Value{ .string_value = "nope" });
+    try testing.expectError(SchemaError.TypeMismatch, numbers_schema.validate(flare.Value{ .array_value = wrong }, "numbers"));
 }

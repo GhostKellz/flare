@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    # Major bumps are reviewed manually; auto-PR only minor and patch.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

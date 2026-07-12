@@ -31,6 +31,9 @@ pub const ErrorContext = struct {
     source_line: ?[]const u8,
     message: []const u8,
     suggestion: ?[]const u8,
+    /// Dotted key path where the error occurred (e.g. "database.host"), when the
+    /// parser has table/key context. Null for lexer-level or context-free errors.
+    path: ?[]const u8 = null,
 };
 
 pub const Parser = struct {
@@ -39,6 +42,12 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     source: []const u8,
     last_error: ?ErrorContext = null,
+    /// Current table header path (e.g. ["database"]) for error reporting.
+    current_table_path: []const []const u8 = &.{},
+    /// Segments of the key currently being parsed (e.g. ["a","b"]) for error
+    /// reporting. Points at parser-local storage that is valid while the
+    /// key/value is being parsed.
+    current_key_segments: []const []const u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, tokens: []const Token) Parser {
         return .{
@@ -93,6 +102,7 @@ pub const Parser = struct {
 
                 // Navigate/create the table structure
                 current_table = try self.getOrCreateTable(root, table_path.items, is_array_table);
+                self.current_table_path = table_path.items;
             } else {
                 // Parse key-value pair
                 try self.parseKeyValue(current_table);
@@ -189,6 +199,9 @@ pub const Parser = struct {
             const part = try self.consume(.identifier, "Expected identifier after '.'");
             try path.append(self.allocator, part.lexeme);
         }
+        // Expose key segments for diagnostics; string is only joined on error.
+        self.current_key_segments = path.items;
+        defer self.current_key_segments = &.{};
 
         _ = try self.consume(.equals, "Expected '=' after key");
 
@@ -213,6 +226,14 @@ pub const Parser = struct {
 
         const final_key = path.items[path.items.len - 1];
         if (current_table.get(final_key)) |_| {
+            self.last_error = ErrorContext{
+                .line = key_token.line,
+                .column = key_token.column,
+                .source_line = self.getSourceLine(key_token.line),
+                .message = "Duplicate key",
+                .suggestion = "This key is already defined; remove or rename it",
+                .path = self.formatPath(),
+            };
             return ParseError.DuplicateKey;
         }
 
@@ -769,9 +790,23 @@ pub const Parser = struct {
             .source_line = self.getSourceLine(token.line),
             .message = message,
             .suggestion = self.getSuggestion(token_type, token.type),
+            .path = self.formatPath(),
         };
 
         return ParseError.UnexpectedToken;
+    }
+
+    /// Build a dotted key path from the current table header and key context,
+    /// e.g. table [database] + key "host" -> "database.host". Returns null when
+    /// there is no context. Allocation failure degrades to null (best-effort).
+    fn formatPath(self: *Parser) ?[]const u8 {
+        if (self.current_table_path.len == 0 and self.current_key_segments.len == 0) return null;
+
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer parts.deinit(self.allocator);
+        for (self.current_table_path) |seg| parts.append(self.allocator, seg) catch return null;
+        for (self.current_key_segments) |seg| parts.append(self.allocator, seg) catch return null;
+        return std.mem.join(self.allocator, ".", parts.items) catch null;
     }
 
     fn getSourceLine(self: *const Parser, line_num: usize) ?[]const u8 {
@@ -831,7 +866,14 @@ pub fn parseToml(allocator: std.mem.Allocator, source: []const u8) !*TomlTable {
     };
 
     var parser = Parser.init(allocator, source, tokens);
-    return parser.parse();
+    return parser.parse() catch |err| {
+        // This API discards error context; free any lazily-built error path so
+        // it does not leak (a no-op under arena allocators used by the loader).
+        if (parser.last_error) |ctx| {
+            if (ctx.path) |p| allocator.free(p);
+        }
+        return err;
+    };
 }
 
 /// Result of parsing with context - contains either table or error details
@@ -845,6 +887,15 @@ pub const ParseResult = struct {
 
     pub fn isError(self: ParseResult) bool {
         return self.error_context != null;
+    }
+
+    /// Free owned allocations in the error context (currently the dotted key
+    /// path built lazily on parser errors). Safe to call on success results.
+    /// Does not free `table`, which remains caller-owned.
+    pub fn deinitError(self: ParseResult, allocator: std.mem.Allocator) void {
+        if (self.error_context) |ctx| {
+            if (ctx.path) |p| allocator.free(p);
+        }
     }
 };
 

@@ -93,8 +93,7 @@ test "schema validation catches constraint violations" {
     // Test value that violates constraints
     const invalid_port = flare.Value{ .int_value = 80 }; // Too low
 
-    try std.testing.expectError(flare.SchemaError.ValueOutOfRange,
-        port_schema.validate(invalid_port, "port"));
+    try std.testing.expectError(flare.SchemaError.ValueOutOfRange, port_schema.validate(invalid_port, "port"));
 
     // Test valid value
     const valid_port = flare.Value{ .int_value = 8080 };
@@ -850,4 +849,278 @@ test "parseTomlWithContext: source line captured in context" {
     const ctx = result.error_context.?;
     // Should capture source line
     try std.testing.expect(ctx.source_line != null);
+}
+
+test "parseTomlWithContext: parser error reports dotted key path" {
+    const allocator = std.testing.allocator;
+
+    // Duplicate key under a table header -> path should read "database.host".
+    const source =
+        \\[database]
+        \\host = "a"
+        \\host = "b"
+    ;
+
+    const result = flare.parseTomlWithContext(allocator, source);
+    // The error context owns `path`; free it via deinitError.
+    defer result.deinitError(allocator);
+
+    try std.testing.expect(result.isError());
+    const ctx = result.error_context.?;
+    try std.testing.expect(ctx.path != null);
+    try std.testing.expectEqualStrings("database.host", ctx.path.?);
+}
+
+// ============================================================================
+// JSON Negative Tests - malformed input must surface FlareError.ParseError
+// ============================================================================
+
+const json_io = std.Options.debug_io;
+const JsonDir = std.Io.Dir;
+
+/// Write `content` to a temp file, attempt to load it as JSON, and return the
+/// load result to the caller. The temp file is always removed.
+fn tryLoadJson(allocator: std.mem.Allocator, path: []const u8, content: []const u8) flare.FlareError!flare.Config {
+    {
+        const file = JsonDir.cwd().createFile(json_io, path, .{}) catch return flare.FlareError.Io;
+        defer file.close(json_io);
+        file.writeStreamingAll(json_io, content) catch return flare.FlareError.Io;
+    }
+    return flare.load(allocator, .{
+        .files = &[_]flare.FileSource{.{ .path = path, .format = .json }},
+    });
+}
+
+test "json negative: invalid number is rejected" {
+    const allocator = std.testing.allocator;
+    const path = "test_json_bad_number.json";
+    defer JsonDir.cwd().deleteFile(json_io, path) catch {};
+
+    // 01 is not a valid JSON number (leading zero).
+    try std.testing.expectError(
+        flare.FlareError.ParseError,
+        tryLoadJson(allocator, path, "{\"port\": 01}"),
+    );
+}
+
+test "json negative: bad string escape is rejected" {
+    const allocator = std.testing.allocator;
+    const path = "test_json_bad_escape.json";
+    defer JsonDir.cwd().deleteFile(json_io, path) catch {};
+
+    // \q is not a valid JSON escape sequence.
+    try std.testing.expectError(
+        flare.FlareError.ParseError,
+        tryLoadJson(allocator, path, "{\"name\": \"a\\qb\"}"),
+    );
+}
+
+test "json negative: trailing comma is rejected" {
+    const allocator = std.testing.allocator;
+    const path = "test_json_trailing_comma.json";
+    defer JsonDir.cwd().deleteFile(json_io, path) catch {};
+
+    try std.testing.expectError(
+        flare.FlareError.ParseError,
+        tryLoadJson(allocator, path, "{\"a\": 1,}"),
+    );
+}
+
+test "json negative: unterminated object is rejected" {
+    const allocator = std.testing.allocator;
+    const path = "test_json_unterminated.json";
+    defer JsonDir.cwd().deleteFile(json_io, path) catch {};
+
+    try std.testing.expectError(
+        flare.FlareError.ParseError,
+        tryLoadJson(allocator, path, "{\"a\": 1"),
+    );
+}
+
+test "json negative: duplicate keys rejected by default policy" {
+    const allocator = std.testing.allocator;
+    const path = "test_json_dup_key.json";
+    defer JsonDir.cwd().deleteFile(json_io, path) catch {};
+
+    // std.json defaults duplicate_field_behavior to .error, so Flare surfaces
+    // duplicate object keys as a parse error rather than silently taking one.
+    try std.testing.expectError(
+        flare.FlareError.ParseError,
+        tryLoadJson(allocator, path, "{\"a\": 1, \"a\": 2}"),
+    );
+}
+
+test "json policy: deep nesting parses successfully" {
+    const allocator = std.testing.allocator;
+    const path = "test_json_deep.json";
+    defer JsonDir.cwd().deleteFile(json_io, path) catch {};
+
+    // 32 levels of nested objects terminating in a leaf value. This documents
+    // that reasonable nesting is accepted (no artificially low depth cap).
+    const depth = 32;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < depth) : (i += 1) try buf.appendSlice(allocator, "{\"n\":");
+    try buf.appendSlice(allocator, "42");
+    i = 0;
+    while (i < depth) : (i += 1) try buf.append(allocator, '}');
+
+    var config = try tryLoadJson(allocator, path, buf.items);
+    defer config.deinit();
+
+    // Walk the dotted key: n.n.n...n (depth segments) -> 42.
+    var key: std.ArrayList(u8) = .empty;
+    defer key.deinit(allocator);
+    i = 0;
+    while (i < depth) : (i += 1) {
+        if (i != 0) try key.append(allocator, '.');
+        try key.append(allocator, 'n');
+    }
+    try std.testing.expectEqual(@as(i64, 42), try config.getInt(key.items, null));
+}
+
+test "json policy: large array parses successfully" {
+    const allocator = std.testing.allocator;
+    const path = "test_json_large_array.json";
+    defer JsonDir.cwd().deleteFile(json_io, path) catch {};
+
+    // Build {"xs": [0,1,...,999]} to exercise large-array handling.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"xs\": [");
+    var num_buf: [8]u8 = undefined;
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        if (i != 0) try buf.append(allocator, ',');
+        const s = try std.fmt.bufPrint(&num_buf, "{d}", .{i});
+        try buf.appendSlice(allocator, s);
+    }
+    try buf.appendSlice(allocator, "]}");
+
+    var config = try tryLoadJson(allocator, path, buf.items);
+    defer config.deinit();
+
+    // The array is stored under "xs"; elements are read by index.
+    const arr = try config.getArray("xs");
+    try std.testing.expectEqual(@as(usize, 1000), arr.items.len);
+    try std.testing.expectEqual(@as(i64, 0), (try config.getByIndex("xs", 0)).int_value);
+    try std.testing.expectEqual(@as(i64, 999), (try config.getByIndex("xs", 999)).int_value);
+}
+
+// ============================================================================
+// Round-trip Tests - parse -> serialize -> parse must preserve values
+// ============================================================================
+
+test "round-trip TOML: parse -> stringify -> parse preserves scalars" {
+    const allocator = std.testing.allocator;
+
+    const source =
+        \\title = "Flare"
+        \\port = 8080
+        \\ratio = 1.5
+        \\enabled = true
+        \\
+        \\[database]
+        \\host = "localhost"
+        \\pool = 16
+    ;
+
+    // First parse produces the reference table.
+    const first = try flare.parseToml(allocator, source);
+    defer {
+        first.deinit();
+        allocator.destroy(first);
+    }
+
+    // Serialize it back to TOML text, then re-parse. A faithful serializer must
+    // yield a document whose values match the original.
+    const text = try flare.stringify(allocator, first);
+    defer allocator.free(text);
+
+    const second = try flare.parseToml(allocator, text);
+    defer {
+        second.deinit();
+        allocator.destroy(second);
+    }
+
+    try std.testing.expectEqualStrings("Flare", second.get("title").?.string);
+    try std.testing.expectEqual(@as(i64, 8080), second.get("port").?.integer);
+    try std.testing.expectEqual(@as(f64, 1.5), second.get("ratio").?.float);
+    try std.testing.expectEqual(true, second.get("enabled").?.boolean);
+
+    const db = second.get("database").?.table;
+    try std.testing.expectEqualStrings("localhost", db.get("host").?.string);
+    try std.testing.expectEqual(@as(i64, 16), db.get("pool").?.integer);
+}
+
+test "round-trip TOML: nested tables and arrays survive serialization" {
+    const allocator = std.testing.allocator;
+
+    const source =
+        \\ids = [1, 2, 3]
+        \\
+        \\[server]
+        \\name = "alpha"
+        \\
+        \\[server.limits]
+        \\max = 100
+    ;
+
+    const first = try flare.parseToml(allocator, source);
+    defer {
+        first.deinit();
+        allocator.destroy(first);
+    }
+
+    const text = try flare.stringify(allocator, first);
+    defer allocator.free(text);
+
+    const second = try flare.parseToml(allocator, text);
+    defer {
+        second.deinit();
+        allocator.destroy(second);
+    }
+
+    const ids = second.get("ids").?.array;
+    try std.testing.expectEqual(@as(usize, 3), ids.items.items.len);
+    try std.testing.expectEqual(@as(i64, 1), ids.items.items[0].integer);
+    try std.testing.expectEqual(@as(i64, 3), ids.items.items[2].integer);
+
+    const server = second.get("server").?.table;
+    try std.testing.expectEqualStrings("alpha", server.get("name").?.string);
+    const limits = server.get("limits").?.table;
+    try std.testing.expectEqual(@as(i64, 100), limits.get("max").?.integer);
+}
+
+test "round-trip TOML->JSON: emitted JSON is valid and value-preserving" {
+    const allocator = std.testing.allocator;
+
+    const source =
+        \\name = "svc"
+        \\replicas = 3
+        \\
+        \\[net]
+        \\port = 443
+    ;
+
+    const table = try flare.parseToml(allocator, source);
+    defer {
+        table.deinit();
+        allocator.destroy(table);
+    }
+
+    const json_text = try flare.toJSON(allocator, table);
+    defer allocator.free(json_text);
+
+    // The emitted JSON must itself be well-formed and carry the same values.
+    // Re-parsing with std.json proves the converter produced valid JSON rather
+    // than a lookalike string.
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("svc", obj.get("name").?.string);
+    try std.testing.expectEqual(@as(i64, 3), obj.get("replicas").?.integer);
+    try std.testing.expectEqual(@as(i64, 443), obj.get("net").?.object.get("port").?.integer);
 }

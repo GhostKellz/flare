@@ -556,7 +556,8 @@ pub fn withDescription(self: Schema, desc: []const u8) Schema
 pub const StringConstraints = struct {
     min_length: ?usize = null,
     max_length: ?usize = null,
-    pattern: ?[]const u8 = null, // Future: regex
+    pattern: ?[]const u8 = null,         // Glob (* / ?) matched in full, enforced
+    choices: ?[]const []const u8 = null, // Enum-style allowed values
 };
 ```
 

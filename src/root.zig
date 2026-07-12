@@ -110,6 +110,56 @@ pub const Value = union(enum) {
     map_value: std.StringHashMap(Value),
 };
 
+/// Which layer a config value's final value came from.
+/// Ordered lowest to highest precedence, matching load order.
+pub const OriginKind = enum {
+    default,
+    file,
+    env,
+    cli,
+    /// Set programmatically via setValue after load.
+    set,
+};
+
+/// Provenance of a resolved config value: which layer won, an optional detail
+/// (file path, env var name, or CLI flag), and the reload generation in which
+/// it was set. Enables Viper-style "why does this key have this value?" queries.
+pub const ValueOrigin = struct {
+    kind: OriginKind,
+    /// Human-facing source detail: file path / env var name / CLI flag.
+    detail: ?[]const u8 = null,
+    /// Reload generation the value was written in (0 on initial load).
+    generation: u32 = 0,
+};
+
+/// A strict-mode diagnostic: a key whose value type changed when a
+/// higher-precedence source overrode a lower one (e.g. a file set `port` to an
+/// int and an env var later set it to a string). Recorded only when strict mode
+/// is enabled. Detection is by exact (already-flattened) key, so it fires on
+/// keys written identically across sources.
+pub const ValueConflict = struct {
+    key: []const u8,
+    /// Origin layer and value type of the value that was overwritten.
+    previous_kind: OriginKind,
+    previous_type: []const u8,
+    /// Origin layer and value type of the overriding value.
+    new_kind: OriginKind,
+    new_type: []const u8,
+};
+
+/// Short type name for a Value tag, used in strict-mode conflict diagnostics.
+fn valueTypeName(value: Value) []const u8 {
+    return switch (value) {
+        .null_value => "null",
+        .bool_value => "bool",
+        .int_value => "int",
+        .float_value => "float",
+        .string_value => "string",
+        .array_value => "array",
+        .map_value => "object",
+    };
+}
+
 /// Callback function type for config change notifications
 pub const ChangeCallback = *const fn (*Config) void;
 
@@ -125,10 +175,28 @@ pub const Config = struct {
     arena: *std.heap.ArenaAllocator,
     data: std.StringHashMap(Value),
     defaults: std.StringHashMap(Value),
+    /// Provenance sidecar: flattened data key -> origin of its current value.
+    origins: std.StringHashMap(ValueOrigin),
+    /// Bumped on each reload so origins can report which generation set a value.
+    generation: u32 = 0,
     schema_def: ?*const Schema = null,
     watched_files: ?std.ArrayList(FileWatcher) = null,
     load_options: ?LoadOptions = null,
     change_callback: ?ChangeCallback = null,
+    /// Diagnostic from the most recent reload attempt: null while the last
+    /// reload (or initial load) succeeded, otherwise the error that caused the
+    /// attempt to be rejected. On failure the previous good state is retained.
+    last_reload_error: ?FlareError = null,
+    /// Minimum quiescence window (nanoseconds) a watched file must be stable for
+    /// before `checkAndReload` acts on it. 0 (default) reloads immediately.
+    /// Coalesces bursts of rapid writes into a single reload once the file
+    /// settles. Set via `setReloadDebounce`.
+    reload_debounce_ns: i128 = 0,
+    /// When true, cross-source value-type changes are recorded in `conflicts`
+    /// as they are applied. Off by default; enable via LoadOptions.strict.
+    strict: bool = false,
+    /// Strict-mode conflict log (arena-backed). Populated during load/reload.
+    conflicts: std.ArrayList(ValueConflict) = .empty,
 
     const Self = @This();
 
@@ -143,6 +211,7 @@ pub const Config = struct {
             .arena = arena,
             .data = std.StringHashMap(Value).init(arena_allocator),
             .defaults = std.StringHashMap(Value).init(arena_allocator),
+            .origins = std.StringHashMap(ValueOrigin).init(arena_allocator),
             .schema_def = null,
         };
     }
@@ -324,8 +393,54 @@ pub const Config = struct {
         return self.defaults.get(key);
     }
 
-    /// Set a value in the config (used by loaders)
+    /// Return the origin of a key's resolved value, mirroring getValue's
+    /// data-then-defaults precedence. Returns null when the key is unset.
+    pub fn getSource(self: *Self, key: []const u8) ?ValueOrigin {
+        if (self.data.get(key)) |_| return self.origins.get(key);
+        if (self.defaults.get(key)) |_| return ValueOrigin{ .kind = .default, .generation = self.generation };
+
+        if (std.mem.indexOf(u8, key, ".") != null) {
+            var stack_buffer: [256]u8 = undefined;
+            if (key.len <= stack_buffer.len) {
+                for (key, 0..) |c, i| stack_buffer[i] = if (c == '.') '_' else c;
+                const flat = stack_buffer[0..key.len];
+                if (self.data.get(flat)) |_| return self.origins.get(flat);
+                if (self.defaults.get(flat)) |_| return ValueOrigin{ .kind = .default, .generation = self.generation };
+            }
+        }
+        return null;
+    }
+
+    /// Format a human-readable explanation of why a key has its final value:
+    /// which layer set it, the source detail, and the reload generation.
+    /// Caller owns the returned slice (allocated with `alloc`).
+    pub fn explain(self: *Self, alloc: std.mem.Allocator, key: []const u8) ![]const u8 {
+        const origin = self.getSource(key) orelse
+            return std.fmt.allocPrint(alloc, "{s}: <unset>", .{key});
+
+        const layer = switch (origin.kind) {
+            .default => "default",
+            .file => "file",
+            .env => "environment variable",
+            .cli => "command-line flag",
+            .set => "programmatic set",
+        };
+        if (origin.detail) |d| {
+            return std.fmt.allocPrint(alloc, "{s} <- {s} ({s}), generation {d}", .{ key, layer, d, origin.generation });
+        }
+        return std.fmt.allocPrint(alloc, "{s} <- {s}, generation {d}", .{ key, layer, origin.generation });
+    }
+
+    /// Set a value in the config (used by loaders).
+    /// Records the value's origin as a programmatic set.
     pub fn setValue(self: *Self, key: []const u8, value: Value) !void {
+        return self.setValueWithOrigin(key, value, .{ .kind = .set });
+    }
+
+    /// Set a value and record where it came from. Loaders pass the layer origin
+    /// (file/env/cli) so precedence can later be explained. The generation field
+    /// of the supplied origin is ignored and replaced with the current one.
+    pub fn setValueWithOrigin(self: *Self, key: []const u8, value: Value, origin: ValueOrigin) !void {
         const arena_allocator = self.getArenaAllocator();
         const owned_key = try arena_allocator.dupe(u8, key);
         const owned_value = switch (value) {
@@ -353,7 +468,30 @@ pub const Config = struct {
                 break :blk Value{ .map_value = new_map };
             },
         };
+        // Strict mode: flag a value-type change under an existing key before we
+        // overwrite it, attributing the previous value to its recorded origin.
+        if (self.strict) {
+            if (self.data.get(owned_key)) |existing| {
+                if (@as(std.meta.Tag(Value), existing) != @as(std.meta.Tag(Value), owned_value)) {
+                    const prev_origin = self.origins.get(owned_key);
+                    try self.conflicts.append(arena_allocator, .{
+                        .key = owned_key,
+                        .previous_kind = if (prev_origin) |o| o.kind else .default,
+                        .previous_type = valueTypeName(existing),
+                        .new_kind = origin.kind,
+                        .new_type = valueTypeName(owned_value),
+                    });
+                }
+            }
+        }
+
         try self.data.put(owned_key, owned_value);
+
+        // Record provenance under the same arena-owned key.
+        var stored_origin = origin;
+        stored_origin.generation = self.generation;
+        if (origin.detail) |d| stored_origin.detail = try arena_allocator.dupe(u8, d);
+        try self.origins.put(owned_key, stored_origin);
     }
 
     /// Helper to clone a value for storage (uses arena allocator)
@@ -471,102 +609,184 @@ pub const Config = struct {
         }
     }
 
-    /// Check if any watched files have changed and reload if necessary
-    /// Returns true if config was reloaded
+    /// Check if any watched files have changed and reload if necessary.
+    /// Returns true only if a reload actually happened.
+    ///
+    /// This is deliberately an explicit polling API: Flare spawns no background
+    /// thread or OS file-watch handle, so the caller decides when to poll (event
+    /// loop tick, timer, SIGHUP handler, ...). Detected changes are debounced by
+    /// `reload_debounce_ns` and watcher timestamps are advanced only after a
+    /// successful reload, so a failed reload (see `reload`) is retried on the
+    /// next poll while the last-known-good config stays in effect.
     pub fn checkAndReload(self: *Self) !bool {
-        if (self.watched_files == null) {
+        if (self.watched_files == null or self.load_options == null) {
             return false;
         }
 
         var changed = false;
+        var newest_mtime: i128 = 0;
         for (self.watched_files.?.items) |*watcher| {
             const stat = std.Io.Dir.cwd().statFile(std.Options.debug_io, watcher.path, .{}) catch continue;
             const mtime_ns = @as(i128, stat.mtime.nanoseconds);
-
             if (mtime_ns > watcher.last_modified) {
                 changed = true;
-                watcher.last_modified = mtime_ns;
+                if (mtime_ns > newest_mtime) newest_mtime = mtime_ns;
             }
         }
 
-        if (changed and self.load_options != null) {
-            // Reload configuration
-            try self.reload();
+        if (!changed) {
+            return false;
+        }
 
-            // Call callback if registered
-            if (self.change_callback) |callback| {
-                callback(self);
+        // Debounce: wait for the file to stop changing. If the newest write is
+        // still within the quiescence window, defer to a later poll so a burst
+        // of rapid writes collapses into one reload.
+        if (self.reload_debounce_ns > 0) {
+            // Wall-clock now, same domain as the file mtimes we compare against.
+            const now = @as(i128, std.Io.Timestamp.now(std.Options.debug_io, .real).nanoseconds);
+            if (now - newest_mtime < self.reload_debounce_ns) {
+                return false;
             }
         }
 
-        return changed;
+        // Reload; on failure the previous good state is preserved and the error
+        // propagates without advancing watcher timestamps (so we retry later).
+        try self.reload();
+
+        // Commit new timestamps only after a successful reload.
+        for (self.watched_files.?.items) |*watcher| {
+            const stat = std.Io.Dir.cwd().statFile(std.Options.debug_io, watcher.path, .{}) catch continue;
+            watcher.last_modified = @as(i128, stat.mtime.nanoseconds);
+        }
+
+        if (self.change_callback) |callback| {
+            callback(self);
+        }
+
+        return true;
     }
 
-    /// Reload configuration from original load options
-    /// Resets arena to prevent unbounded memory growth while preserving defaults.
+    /// Reload configuration from the original load options.
+    ///
+    /// Last-known-good semantics: the new configuration is built in a separate
+    /// staging arena and only swapped in once every required source has loaded
+    /// successfully. If a required file is missing/invalid (or any loader
+    /// errors), the staging arena is discarded, the previous good state is left
+    /// completely untouched, `last_reload_error` records the failure, and the
+    /// error is returned. This prevents a bad edit from wiping a running
+    /// service's config. On success the old arena is freed (bounding memory
+    /// growth across reloads) and the generation counter is bumped.
     pub fn reload(self: *Self) !void {
         if (self.load_options == null) {
             return FlareError.WatcherNotInitialized;
         }
-
-        // Step 1: Clone defaults to parent allocator (outside arena)
-        var saved_defaults = std.StringHashMap(Value).init(self.allocator);
-        defer {
-            // Free temporary copies after we're done
-            var iter = saved_defaults.iterator();
-            while (iter.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
-                freeValueWithAllocator(self.allocator, entry.value_ptr.*);
-            }
-            saved_defaults.deinit();
-        }
-
-        var defaults_iter = self.defaults.iterator();
-        while (defaults_iter.next()) |entry| {
-            const key = try self.allocator.dupe(u8, entry.key_ptr.*);
-            errdefer self.allocator.free(key);
-            const value = try cloneValueWithAllocator(self.allocator, entry.value_ptr.*);
-            try saved_defaults.put(key, value);
-        }
-
-        // Step 2: Reset arena to free all previous allocations
-        _ = self.arena.reset(.free_all);
-
-        // Step 3: Reinitialize hashmaps with fresh arena allocator
-        const arena_allocator = self.arena.allocator();
-        self.data = std.StringHashMap(Value).init(arena_allocator);
-        self.defaults = std.StringHashMap(Value).init(arena_allocator);
-
-        // Step 4: Restore defaults into fresh arena
-        var saved_iter = saved_defaults.iterator();
-        while (saved_iter.next()) |entry| {
-            const arena_key = try arena_allocator.dupe(u8, entry.key_ptr.*);
-            const arena_value = try cloneValueWithAllocator(arena_allocator, entry.value_ptr.*);
-            try self.defaults.put(arena_key, arena_value);
-        }
-
         const options = self.load_options.?;
 
-        // Reload from files
+        // Build the next state in a fresh, independent arena so a failure can be
+        // rolled back by simply throwing the staging arena away.
+        const staging_arena = try self.allocator.create(std.heap.ArenaAllocator);
+        staging_arena.* = std.heap.ArenaAllocator.init(self.allocator);
+        const staging_alloc = staging_arena.allocator();
+
+        // On any failure below, tear down the staging arena and leave `self`
+        // exactly as it was. Success paths clear this guard via `committed`.
+        var committed = false;
+        errdefer {
+            if (!committed) {
+                staging_arena.deinit();
+                self.allocator.destroy(staging_arena);
+            }
+        }
+
+        var staged = Self{
+            .allocator = self.allocator,
+            .arena = staging_arena,
+            .data = std.StringHashMap(Value).init(staging_alloc),
+            .defaults = std.StringHashMap(Value).init(staging_alloc),
+            .origins = std.StringHashMap(ValueOrigin).init(staging_alloc),
+            .generation = self.generation + 1,
+            .schema_def = self.schema_def,
+            .load_options = self.load_options,
+            .strict = self.strict,
+        };
+
+        // Carry defaults forward (they are not sourced from files).
+        var defaults_iter = self.defaults.iterator();
+        while (defaults_iter.next()) |entry| {
+            const key = try staging_alloc.dupe(u8, entry.key_ptr.*);
+            const value = try cloneValueWithAllocator(staging_alloc, entry.value_ptr.*);
+            try staged.defaults.put(key, value);
+        }
+
+        // Reload from files (lowest precedence). A failing required file aborts
+        // the whole reload; optional files are skipped as before.
         if (options.files) |files| {
             for (files) |file_source| {
-                loadFile(self, file_source) catch |err| {
+                loadFile(&staged, file_source) catch |err| {
                     if (file_source.required) {
+                        self.last_reload_error = err;
                         return err;
                     }
                 };
             }
         }
 
-        // Reload from environment variables
         if (options.env) |env_source| {
-            try loadEnv(self, env_source);
+            loadEnv(&staged, env_source) catch |err| {
+                self.last_reload_error = err;
+                return err;
+            };
         }
 
-        // Reload from CLI args
         if (options.cli) |cli_source| {
-            try loadCli(self, cli_source);
+            loadCli(&staged, cli_source) catch |err| {
+                self.last_reload_error = err;
+                return err;
+            };
         }
+
+        // Commit: swap the staged state in and free the old arena.
+        committed = true;
+        const old_arena = self.arena;
+        self.arena = staged.arena;
+        self.data = staged.data;
+        self.defaults = staged.defaults;
+        self.origins = staged.origins;
+        self.conflicts = staged.conflicts;
+        self.generation = staged.generation;
+        self.last_reload_error = null;
+        old_arena.deinit();
+        self.allocator.destroy(old_arena);
+    }
+
+    /// Nanosecond quiescence window a watched file must be stable for before
+    /// `checkAndReload` acts on a detected change. Coalesces rapid successive
+    /// writes into a single reload. 0 disables debouncing (immediate reload).
+    pub fn setReloadDebounce(self: *Self, ns: i128) void {
+        self.reload_debounce_ns = ns;
+    }
+
+    /// Diagnostic accessor: the error from the last failed reload attempt, or
+    /// null if the most recent reload/load succeeded. On failure the previous
+    /// good configuration remains in effect.
+    pub fn lastReloadError(self: *const Self) ?FlareError {
+        return self.last_reload_error;
+    }
+
+    /// Enable or disable strict mode (cross-source type-change detection).
+    /// Only affects values set after the call.
+    pub fn setStrict(self: *Self, strict: bool) void {
+        self.strict = strict;
+    }
+
+    /// Whether any cross-source value-type conflicts were recorded in strict mode.
+    pub fn hasConflicts(self: *const Self) bool {
+        return self.conflicts.items.len > 0;
+    }
+
+    /// The strict-mode conflict log (empty unless strict mode is enabled).
+    pub fn getConflicts(self: *const Self) []const ValueConflict {
+        return self.conflicts.items;
     }
 };
 
@@ -575,6 +795,9 @@ pub const LoadOptions = struct {
     files: ?[]const FileSource = null,
     env: ?EnvSource = null,
     cli: ?CliSource = null,
+    /// Enable strict mode: record cross-source value-type changes in the
+    /// config's conflict log (see `getConflicts`). Off by default.
+    strict: bool = false,
 };
 
 pub const FileFormat = enum {
@@ -605,9 +828,13 @@ pub const CliSource = struct {
 /// Main entry point to load configuration
 pub fn load(allocator: std.mem.Allocator, options: LoadOptions) FlareError!Config {
     var config = Config.init(allocator) catch return FlareError.OutOfMemory;
+    // A required-file parse failure (or any loader error) must not leak the
+    // partially-built config's arena; tear it down on the error path.
+    errdefer config.deinit();
 
     // Store load options for hot reload capability
     config.load_options = options;
+    config.strict = options.strict;
 
     // Load from files first (lowest precedence)
     if (options.files) |files| {
@@ -645,6 +872,8 @@ fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
     // Determine file format
     const format = determineFileFormat(file_source.path, file_source.format);
 
+    const origin = ValueOrigin{ .kind = .file, .detail = file_source.path };
+
     switch (format) {
         .json => {
             // Parse JSON using arena allocator
@@ -652,11 +881,11 @@ fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
             defer parsed.deinit();
 
             // Convert JSON to config values
-            try loadJsonObject(config, "", parsed.value);
+            try loadJsonObject(config, "", parsed.value, origin);
         },
         .toml => {
             // Use new TOML 1.0 parser
-            try loadTomlContent(config, contents);
+            try loadTomlContent(config, contents, origin);
         },
         .auto => {
             // This should not happen after determineFileFormat
@@ -666,7 +895,7 @@ fn loadFile(config: *Config, file_source: FileSource) FlareError!void {
 }
 
 /// Load TOML content using the new TOML 1.0 parser
-fn loadTomlContent(config: *Config, contents: []const u8) FlareError!void {
+fn loadTomlContent(config: *Config, contents: []const u8, origin: ValueOrigin) FlareError!void {
     const arena_allocator = config.getArenaAllocator();
 
     // Parse using new TOML 1.0 parser
@@ -679,12 +908,12 @@ fn loadTomlContent(config: *Config, contents: []const u8) FlareError!void {
     }
 
     // Convert TomlTable to flattened Config entries
-    try loadTomlTable(config, toml_table, "");
+    try loadTomlTable(config, toml_table, "", origin);
 }
 
 /// Recursively convert TomlTable entries into Config with flattened keys
 /// Stores BOTH flattened keys AND nested map_value objects for getMap()/schema validation
-fn loadTomlTable(config: *Config, table: *const toml_value.TomlTable, prefix: []const u8) FlareError!void {
+fn loadTomlTable(config: *Config, table: *const toml_value.TomlTable, prefix: []const u8, origin: ValueOrigin) FlareError!void {
     const arena_allocator = config.getArenaAllocator();
     var it = table.map.iterator();
 
@@ -701,11 +930,11 @@ fn loadTomlTable(config: *Config, table: *const toml_value.TomlTable, prefix: []
         switch (val) {
             .table => |nested| {
                 // Recurse into nested tables for flattened keys
-                try loadTomlTable(config, nested, full_key);
+                try loadTomlTable(config, nested, full_key, origin);
 
                 // Also store the nested table as a map_value (for getMap() and schema validation)
                 const converted = toml_value.tomlValueToFlareValue(arena_allocator, val) catch return FlareError.OutOfMemory;
-                try config.setValue(full_key, converted);
+                try config.setValueWithOrigin(full_key, converted, origin);
             },
             .array => |arr| {
                 // Check if array of tables
@@ -717,17 +946,17 @@ fn loadTomlTable(config: *Config, table: *const toml_value.TomlTable, prefix: []
                         const converted = toml_value.tomlValueToFlareValue(arena_allocator, item) catch return FlareError.OutOfMemory;
                         array_list.append(arena_allocator, converted) catch return FlareError.OutOfMemory;
                     }
-                    try config.setValue(full_key, Value{ .array_value = array_list });
+                    try config.setValueWithOrigin(full_key, Value{ .array_value = array_list }, origin);
                 } else {
                     // Regular array - convert directly
                     const converted = toml_value.tomlValueToFlareValue(arena_allocator, val) catch return FlareError.OutOfMemory;
-                    try config.setValue(full_key, converted);
+                    try config.setValueWithOrigin(full_key, converted, origin);
                 }
             },
             else => {
                 // Primitive values (string, integer, float, boolean, datetime, etc.)
                 const converted = toml_value.tomlValueToFlareValue(arena_allocator, val) catch return FlareError.OutOfMemory;
-                try config.setValue(full_key, converted);
+                try config.setValueWithOrigin(full_key, converted, origin);
             },
         }
     }
@@ -783,7 +1012,7 @@ fn jsonToValue(config: *Config, json_value: std.json.Value) FlareError!Value {
 /// Recursively load JSON object into config
 /// Stores BOTH flattened keys (e.g., "database_host") AND nested map_value objects
 /// This enables both dot notation access AND getMap()/schema validation
-fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Value) FlareError!void {
+fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Value, origin: ValueOrigin) FlareError!void {
     switch (json_value) {
         .object => |obj| {
             const arena_allocator = config.getArenaAllocator();
@@ -795,41 +1024,41 @@ fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Valu
                 else
                     try std.fmt.allocPrint(arena_allocator, "{s}_{s}", .{ prefix, key });
 
-                try loadJsonObject(config, full_key, value);
+                try loadJsonObject(config, full_key, value, origin);
             }
 
             // Also store the object itself as a nested map_value (for getMap() and schema validation)
             if (prefix.len > 0) {
                 const nested_map = try jsonToValue(config, json_value);
-                try config.setValue(prefix, nested_map);
+                try config.setValueWithOrigin(prefix, nested_map, origin);
             }
         },
         .string => |s| {
-            try config.setValue(prefix, Value{ .string_value = s });
+            try config.setValueWithOrigin(prefix, Value{ .string_value = s }, origin);
         },
         .integer => |i| {
-            try config.setValue(prefix, Value{ .int_value = i });
+            try config.setValueWithOrigin(prefix, Value{ .int_value = i }, origin);
         },
         .float => |f| {
-            try config.setValue(prefix, Value{ .float_value = f });
+            try config.setValueWithOrigin(prefix, Value{ .float_value = f }, origin);
         },
         .number_string => |s| {
             // Try to parse as integer first, then float, otherwise keep as string
             if (std.fmt.parseInt(i64, s, 10)) |i| {
-                try config.setValue(prefix, Value{ .int_value = i });
+                try config.setValueWithOrigin(prefix, Value{ .int_value = i }, origin);
             } else |_| {
                 if (std.fmt.parseFloat(f64, s)) |f| {
-                    try config.setValue(prefix, Value{ .float_value = f });
+                    try config.setValueWithOrigin(prefix, Value{ .float_value = f }, origin);
                 } else |_| {
-                    try config.setValue(prefix, Value{ .string_value = s });
+                    try config.setValueWithOrigin(prefix, Value{ .string_value = s }, origin);
                 }
             }
         },
         .bool => |b| {
-            try config.setValue(prefix, Value{ .bool_value = b });
+            try config.setValueWithOrigin(prefix, Value{ .bool_value = b }, origin);
         },
         .null => {
-            try config.setValue(prefix, Value.null_value);
+            try config.setValueWithOrigin(prefix, Value.null_value, origin);
         },
         .array => |arr| {
             const arena_allocator = config.getArenaAllocator();
@@ -839,7 +1068,7 @@ fn loadJsonObject(config: *Config, prefix: []const u8, json_value: std.json.Valu
                 const element_value = try jsonToValue(config, item);
                 try array_list.append(arena_allocator, element_value);
             }
-            try config.setValue(prefix, Value{ .array_value = array_list });
+            try config.setValueWithOrigin(prefix, Value{ .array_value = array_list }, origin);
         },
     }
 }
@@ -890,7 +1119,7 @@ fn loadEnv(config: *Config, env_source: EnvSource) FlareError!void {
         // Try to parse the value into appropriate type
         const value = try parseEnvValue(arena_allocator, env_value);
 
-        try config.setValue(config_key, value);
+        try config.setValueWithOrigin(config_key, value, .{ .kind = .env, .detail = env_key });
     }
 }
 
@@ -905,7 +1134,8 @@ fn convertEnvKeyToConfigKey(allocator: std.mem.Allocator, env_key: []const u8, s
 
     while (read_pos < env_key.len) {
         if (read_pos + separator.len <= env_key.len and
-            std.mem.eql(u8, env_key[read_pos..read_pos + separator.len], separator)) {
+            std.mem.eql(u8, env_key[read_pos .. read_pos + separator.len], separator))
+        {
             // Replace separator with dot
             result[write_pos] = '.';
             write_pos += 1;
@@ -955,12 +1185,12 @@ fn loadCli(config: *Config, cli_source: CliSource) FlareError!void {
             if (std.mem.indexOf(u8, key_value, "=")) |eq_pos| {
                 // Format: --key=value
                 const key = key_value[0..eq_pos];
-                const value_str = key_value[eq_pos + 1..];
+                const value_str = key_value[eq_pos + 1 ..];
 
                 // Convert key to config path (replace - with .)
                 const config_key = try convertCliKeyToConfigKey(arena_allocator, key);
                 const value = try parseCliValue(arena_allocator, value_str);
-                try config.setValue(config_key, value);
+                try config.setValueWithOrigin(config_key, value, .{ .kind = .cli, .detail = arg });
             } else {
                 // Format: --key value (next arg is the value)
                 if (i + 1 < cli_source.args.len) {
@@ -970,13 +1200,13 @@ fn loadCli(config: *Config, cli_source: CliSource) FlareError!void {
                     // Convert key to config path
                     const config_key = try convertCliKeyToConfigKey(arena_allocator, key);
                     const value = try parseCliValue(arena_allocator, value_str);
-                    try config.setValue(config_key, value);
+                    try config.setValueWithOrigin(config_key, value, .{ .kind = .cli, .detail = arg });
 
                     i += 1; // Skip the value arg
                 } else {
                     // Boolean flag without value, treat as true
                     const config_key = try convertCliKeyToConfigKey(arena_allocator, key_value);
-                    try config.setValue(config_key, Value{ .bool_value = true });
+                    try config.setValueWithOrigin(config_key, Value{ .bool_value = true }, .{ .kind = .cli, .detail = arg });
                 }
             }
         } else if (std.mem.startsWith(u8, arg, "-")) {
@@ -987,11 +1217,11 @@ fn loadCli(config: *Config, cli_source: CliSource) FlareError!void {
                 // Has a value
                 const value_str = cli_source.args[i + 1];
                 const value = try parseCliValue(arena_allocator, value_str);
-                try config.setValue(flag, value);
+                try config.setValueWithOrigin(flag, value, .{ .kind = .cli, .detail = arg });
                 i += 1; // Skip the value
             } else {
                 // Boolean flag
-                try config.setValue(flag, Value{ .bool_value = true });
+                try config.setValueWithOrigin(flag, Value{ .bool_value = true }, .{ .kind = .cli, .detail = arg });
             }
         }
 
@@ -1035,7 +1265,8 @@ pub fn parseCliValue(allocator: std.mem.Allocator, cli_value: []const u8) !Value
 
     // Try parsing as JSON array or object
     if ((std.mem.startsWith(u8, cli_value, "[") and std.mem.endsWith(u8, cli_value, "]")) or
-        (std.mem.startsWith(u8, cli_value, "{") and std.mem.endsWith(u8, cli_value, "}"))) {
+        (std.mem.startsWith(u8, cli_value, "{") and std.mem.endsWith(u8, cli_value, "}")))
+    {
         // Attempt to parse as JSON
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, cli_value, .{}) catch {
             // If JSON parsing fails, treat as string
@@ -1211,9 +1442,45 @@ test "validation and introspection" {
     try std.testing.expectError(FlareError.MissingKey, validation_result);
 }
 
+test "strict mode records cross-source type conflict" {
+    var config = try Config.init(std.testing.allocator);
+    defer config.deinit();
+    config.setStrict(true);
+
+    // File layer sets an int.
+    try config.setValueWithOrigin("port", Value{ .int_value = 8080 }, .{ .kind = .file, .detail = "app.json" });
+    try std.testing.expect(!config.hasConflicts());
+
+    // A higher-precedence source overrides the same key with a different type.
+    try config.setValueWithOrigin("port", Value{ .string_value = "high" }, .{ .kind = .cli, .detail = "--port" });
+    try std.testing.expect(config.hasConflicts());
+
+    const conflicts = config.getConflicts();
+    try std.testing.expect(conflicts.len == 1);
+    try std.testing.expect(std.mem.eql(u8, conflicts[0].key, "port"));
+    try std.testing.expect(conflicts[0].previous_kind == .file);
+    try std.testing.expect(std.mem.eql(u8, conflicts[0].previous_type, "int"));
+    try std.testing.expect(conflicts[0].new_kind == .cli);
+    try std.testing.expect(std.mem.eql(u8, conflicts[0].new_type, "string"));
+
+    // A same-type override is not a conflict.
+    try config.setValueWithOrigin("port", Value{ .string_value = "higher" }, .{ .kind = .set });
+    try std.testing.expect(config.getConflicts().len == 1);
+}
+
+test "strict mode off by default records no conflicts" {
+    var config = try Config.init(std.testing.allocator);
+    defer config.deinit();
+
+    try config.setValueWithOrigin("k", Value{ .int_value = 1 }, .{ .kind = .file });
+    try config.setValueWithOrigin("k", Value{ .string_value = "x" }, .{ .kind = .cli });
+    try std.testing.expect(!config.hasConflicts());
+}
+
 // Include integration tests
 comptime {
     _ = @import("integration_tests.zig");
+    _ = @import("origin_tests.zig");
     _ = @import("hot_reload_tests.zig");
     _ = @import("toml_value.zig");
     _ = @import("toml_lexer.zig");

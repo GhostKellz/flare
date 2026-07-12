@@ -150,6 +150,49 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // ------------------------------------------------------------------
+    // Examples: compiled (and installed under `zig build examples`) so the
+    // public API stays demonstrably consumable. They are not part of the
+    // default install to keep `zig build` lean.
+    // ------------------------------------------------------------------
+    const example_names = [_][]const u8{
+        "schema_demo",
+        "flash_integration_demo",
+    };
+    const examples_step = b.step("examples", "Build the example programs");
+    for (example_names) |name| {
+        const example = b.addExecutable(.{
+            .name = name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("examples/{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "flare", .module = mod },
+                },
+            }),
+        });
+        const install_example = b.addInstallArtifact(example, .{});
+        examples_step.dependOn(&install_example.step);
+    }
+
+    // ------------------------------------------------------------------
+    // Release gate: `zig build verify` = build + test + examples + fmt check.
+    // ------------------------------------------------------------------
+    const fmt_check = b.addFmt(.{
+        .paths = &.{
+            b.path("src"),
+            b.path("examples"),
+            b.path("build.zig"),
+        },
+        .check = true,
+    });
+    const verify_step = b.step("verify", "Release gate: build + test + examples + zig fmt --check");
+    verify_step.dependOn(b.getInstallStep());
+    verify_step.dependOn(test_step);
+    verify_step.dependOn(examples_step);
+    verify_step.dependOn(&fmt_check.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
